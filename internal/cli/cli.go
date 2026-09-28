@@ -14,6 +14,8 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/shopspring/decimal"
+
 	appcfg "github.com/shing1211/longbridge-go-demo/internal/config"
 )
 
@@ -73,8 +75,10 @@ func NewUsage(name, summary string) *Usage {
 			fmt.Fprintln(out, l)
 		}
 		fmt.Fprintf(out, "\nSafety:\n")
-		fmt.Fprintf(out, "  LONGPORT_DRY_RUN  1/true (default) blocks all order writes.\n")
-		fmt.Fprintf(out, "  LONGPORT_MODE      simulated (default) or live.\n")
+		fmt.Fprintf(out, "  LONGPORT_DRY_RUN            1/true (default) blocks all order writes.\n")
+		fmt.Fprintf(out, "  LONGPORT_MODE                simulated (default) or live.\n")
+		fmt.Fprintf(out, "  LONGPORT_WATCHLIST_DRY_RUN   1/true (default) blocks watchlist writes\n")
+		fmt.Fprintf(out, "                              (a separate gate; see cmd/watchlist).\n")
 		fmt.Fprintf(out, "\nSee README.md for the simulated-account walkthrough.\n")
 	}
 
@@ -116,3 +120,47 @@ func FmtTime(ts int64) string {
 	}
 	return time.Unix(ts, 0).Format("2006-01-02 15:04:05")
 }
+
+// Dec renders an optional decimal at a fixed 2dp, or "-" when nil. Most SDK
+// value fields are *decimal.Decimal precisely so that "absent" is
+// distinguishable from zero, so a plain String() would print an empty cell.
+func Dec(d *decimal.Decimal) string {
+	if d == nil {
+		return "-"
+	}
+	return d.StringFixed(2)
+}
+
+// Dec4 is Dec at 4dp, for per-share and per-unit figures where 2dp loses
+// meaningful precision (warrant premiums, greeks, conversion ratios).
+func Dec4(d *decimal.Decimal) string {
+	if d == nil {
+		return "-"
+	}
+	return d.StringFixed(4)
+}
+
+// Truncate shortens s to at most n runes, marking the cut with an ellipsis so
+// a clipped cell is never mistaken for a complete one.
+func Truncate(s string, n int) string {
+	r := []rune(s)
+	if len(r) <= n {
+		return s
+	}
+	if n <= 1 {
+		return "…"
+	}
+	return string(r[:n-1]) + "…"
+}
+
+// OrDash returns s, or "-" when s is empty, for the many string fields the SDK
+// models as plain strings with an absent-is-empty convention.
+func OrDash(s string) string {
+	if s == "" {
+		return "-"
+	}
+	return s
+}
+
+// Section prints a top-level heading.
+func Section(title string) { fmt.Printf("\n=== %s ===\n", title) }

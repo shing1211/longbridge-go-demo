@@ -4,8 +4,21 @@ A small, complete, safety-gated demo of the **Longbridge (Longport) OpenAPI**
 using the official Go SDK, [`github.com/longbridge/openapi-go`](https://pkg.go.dev/github.com/longbridge/openapi-go)
 at **v0.25.2**.
 
-Four commands, one shared config loader, and a hard rule that no order can be
+Eight commands, one shared config loader, and a hard rule that no order can be
 sent unless you say so three different ways.
+
+**SDK coverage: every exported method on `QuoteContext` and `TradeContext` is
+exercised somewhere in `cmd/`.** That is 66 method definitions (47 on
+`QuoteContext`, 19 on `TradeContext`), covering 62 distinct method names —
+the gap is `Close`, `Subscribe`, `Unsubscribe` and `Trades` appearing on both
+types. See [Coverage](#sdk-coverage) for the command that verifies this.
+
+The SDK has 130 context methods in total across ten context types. The other
+64 belong to `FundamentalContext` (32), `SharelistContext` (8), `ContentContext`
+(7), `ScreenerContext` (5), `PortfolioContext` (5), `AlertContext` (4),
+`AssetContext` (2) and `CalendarContext` (1), none of which this demo uses —
+they cover fundamental data, share lists, research content, screeners,
+portfolios, price alerts and the trading calendar.
 
 > **Status: not yet tested against the live API.** See
 > [Honest status](#honest-status). Everything below was verified by building,
@@ -20,8 +33,10 @@ sent unless you say so three different ways.
 - [What you need to fill in](#what-you-need-to-fill-in)
 - [Simulated vs live — read this](#simulated-vs-live--read-this)
 - [Dry-run semantics and the safety gate](#dry-run-semantics-and-the-safety-gate)
+- [The two safety gates](#the-two-safety-gates)
 - [Commands](#commands)
 - [Configuration reference](#configuration-reference)
+- [SDK coverage](#sdk-coverage)
 - [Honest status](#honest-status)
 - [Troubleshooting](#troubleshooting)
 - [Project layout](#project-layout)
@@ -51,6 +66,12 @@ go run ./cmd/watch -symbols 700.HK
 go run ./cmd/trade -action balance
 go run ./cmd/trade -action positions
 go run ./cmd/trade -action today-orders
+
+# 5. The rest of the read-only surface.
+go run ./cmd/warrant                      # HK derivative warrants
+go run ./cmd/watchlist -action list        # saved watchlist groups
+go run ./cmd/executions -action today-executions
+go run ./cmd/reference                     # static + market-wide reference data
 ```
 
 Every binary prints usage with `-h` and needs **no** credentials for that:
@@ -94,6 +115,13 @@ have: the `LONGBRIDGE_ACCESS_TOKEN` issued for that simulated account.** Use
 the *simulated account's own* App Key / App Secret / Access Token triple.
 Longbridge issues a completely separate credential set for simulated accounts;
 it is not a flag you toggle on live credentials.
+
+Once that simulated access token is available, every read-only command in this
+repo can be run against it directly — drop the triple into `.env` and go. This
+is the recommended way to exercise the demo end to end, including the
+order paths, which will trade simulated money in a sandbox rather than real
+money. Nothing in the code needs to change to switch accounts: the credentials
+are the only thing that differs.
 
 Two easy-to-confuse notes:
 
@@ -199,6 +227,82 @@ add a new write operation, copy the existing `gate(...)` shape.
 
 ---
 
+## The two safety gates
+
+This demo guards two different kinds of mutation with two **separate**,
+independently-defaulted gates. They are not interchangeable, and neither one
+opens the other.
+
+| | Order gate | Watchlist gate |
+| --- | --- | --- |
+| Guards | `SubmitOrder`, `ReplaceOrder`, `CancelOrder`, `WithdrawOrder` | `CreateWatchlistGroup`, `DeleteWatchlistGroup`, `UpdateWatchlistGroup`, `UpdatePinned` |
+| Env switch | `LONGPORT_DRY_RUN` (default `1`) | `LONGPORT_WATCHLIST_DRY_RUN` (default `1`) |
+| Flag | `--confirm-live` | `--confirm` |
+| Also requires | `LONGPORT_MODE=live` | — |
+| Implementation | `config.GuardWrite` | `config.GuardWatchlist` |
+
+**Why watchlist writes are not under the order gate.** The order gate's third
+condition, `LONGPORT_MODE=live`, exists because "live" means real money. A
+watchlist group is a saved list of ticker symbols: labelling a cosmetic
+preference change as "live trading" would be dishonest, and blocking it until
+you assert you have real money would be needlessly annoying. But these calls do
+mutate server-side state and are not idempotent, so they needed *a* real guard,
+not none. Hence a second gate with its own dry-run default.
+
+Either gate refusing makes **no network call at all**: the write commands print
+the exact request they would send, explain the refusal, and exit 0 without
+constructing a context. Verified for both:
+
+```console
+$ go run ./cmd/watchlist -action create -name demo -symbols 700.HK
+[config] watchlist_dry_run=true (separate gate: LONGPORT_WATCHLIST_DRY_RUN + --confirm)
+
+--- CreateWatchlistGroup request ---
+  name         demo
+  symbols      700.HK
+
+BLOCKED: missing --confirm
+DRY RUN: nothing was sent to Longbridge.
+Watchlist writes are guarded separately from orders; pass
+  --confirm   together with   LONGPORT_WATCHLIST_DRY_RUN=0
+
+$ go run ./cmd/watchlist -action create -name demo -symbols 700.HK --confirm
+[config] watchlist_dry_run=true (separate gate: LONGPORT_WATCHLIST_DRY_RUN + --confirm)
+
+--- CreateWatchlistGroup request ---
+  name         demo
+  symbols      700.HK
+
+BLOCKED: refusing to create a watchlist group: watchlist DRY RUN is active.
+No change was sent. Watchlist writes mutate your account's
+saved groups, so they are guarded separately from orders.
+To allow them set
+  LONGPORT_WATCHLIST_DRY_RUN=0
+and pass --confirm. Both are required.
+DRY RUN: nothing was sent to Longbridge.
+
+$ LONGPORT_WATCHLIST_DRY_RUN=0 go run ./cmd/watchlist -action create -name demo --confirm
+--- CreateWatchlistGroup request ---
+  name         demo
+  symbols      -
+
+error: creating quote context: ... httpStatus:401 code:401004 message:token invalid
+```
+
+The last line is the proof the write path is genuinely wired: with both
+switches set it stops refusing and reaches the real API (here rejected for the
+dummy token).
+
+Both switches are required and either alone still blocks. A bad
+`LONGPORT_WATCHLIST_DRY_RUN` value is rejected at startup rather than being
+silently treated as "on", and an unparseable value at runtime fails safe.
+
+Note that `executions -action withdraw` is an **order** write (`WithdrawOrder`
+is an alias of `CancelOrder` in the SDK), so it uses the order gate and
+`--confirm-live` — not the watchlist gate.
+
+---
+
 ## Commands
 
 ### `quote` — market data snapshot (read-only)
@@ -267,6 +371,10 @@ Stops cleanly on `Ctrl-C`: it unsubscribes, closes the context and exits 0.
 go run ./cmd/watch -symbols 700.HK,AAPL.US
 go run ./cmd/watch -symbols 700.HK -trade=false -depth=false   # quotes only
 go run ./cmd/watch -symbols 700.HK -brokers -interval 5s
+
+# Order updates instead of quote data (trade websocket, not quote):
+go run ./cmd/watch -orders
+go run ./cmd/watch -orders -topics trade,order
 ```
 
 | Flag | Default | Notes |
@@ -276,10 +384,18 @@ go run ./cmd/watch -symbols 700.HK -brokers -interval 5s
 | `-trade` | `true` | Individual ticks. |
 | `-depth` | `true` | Order book. |
 | `-brokers` | `false` | Broker queues (noisy). |
+| `-orders` | `false` | Stream ORDER updates instead; takes a separate path. |
+| `-topics` | `trade` | Trade topics for `-orders`. |
 | `-interval` | `2s` | Throttle for depth prints. |
 
 Depth is throttled because the book updates many times a second and
 unthrottled output is unreadable.
+
+`-orders` uses a `TradeContext` rather than a `QuoteContext`, because order
+pushes arrive on a different websocket (`wss://openapi-trade...`). It is still
+read-only: subscribing to a push feed changes nothing server-side. It reports
+per-topic subscribe failures explicitly, because a partial subscribe still
+"successfully" returns and silently streaming nothing is the confusing outcome.
 
 ### `market` — reference data (read-only)
 
@@ -299,6 +415,156 @@ go run ./cmd/market -sections timeline -timeline-symbol 700.HK -lines 30
 | `-back` / `-forward` | `7` | Calendar window in days. |
 | `-timeline-symbol` | `700.HK` | Intraday symbol. |
 | `-lines` | `20` | Intraday lines to print. |
+
+### `warrant` — HK derivative warrants (read-only)
+
+```bash
+go run ./cmd/warrant                                # warrants over 700.HK
+go run ./cmd/warrant -underlying 9988.HK -count 20
+go run ./cmd/warrant -type call,put -expiry gt12 -sort-by change_rate -sort-order asc
+go run ./cmd/warrant -action quote -warrant-symbols 12181.HK,67408.HK
+go run ./cmd/warrant -action issuers
+```
+
+| Flag | Default | Notes |
+| --- | --- | --- |
+| `-action` | `list` | `list`, `quote` or `issuers`. |
+| `-underlying` | `700.HK` | Underlying stock for `list`. |
+| `-warrant-symbols` | `12181.HK,67408.HK` | Contracts for `quote`. |
+| `-sort-by` | `last_done` | `last_done change_rate change_val volume turnover expiry_date strike_price outstanding_qty implied_volatility delta status`. |
+| `-sort-order` | `desc` | `asc` or `desc`. |
+| `-count` | `10` | `sort_count`. |
+| `-offset` | `0` | `sort_offset`, for paging. |
+| `-type` | — | `call put bull bear inline`, comma-separated. |
+| `-expiry` | — | `lt3 bt3_6 bt6_12 gt12`. |
+| `-moneyness` | — | `in` or `out`. |
+| `-status` | — | `suspend listed normal`. |
+| `-language` | `zh-hk` | `zh-cn`, `en` or `zh-hk`. |
+
+Warrants are a HK-only product, so `-underlying` must be a `.HK` symbol. All
+the filter enums are bare `int32` in the SDK, so they are parsed by explicit
+switch: an unrecognised value is an error rather than a silent zero, because a
+wrong cast would quietly return the wrong warrants.
+
+### `watchlist` — saved groups, with a gated editor
+
+`-action list` is a pure read. The other four actions mutate your account's
+saved groups and are behind the [watchlist gate](#the-two-safety-gates).
+
+```bash
+go run ./cmd/watchlist -action list
+
+# Writes — dry run unless you set BOTH switches.
+go run ./cmd/watchlist -action create -name tech -symbols 700.HK,AAPL.US
+go run ./cmd/watchlist -action update -group-id 12345 -symbols MSFT.US -update-mode add
+go run ./cmd/watchlist -action update -group-id 12345 -update-mode remove -symbols 700.HK
+go run ./cmd/watchlist -action pin -symbols 700.HK -pin-mode add
+go run ./cmd/watchlist -action delete -group-id 12345 -purge
+
+# Actually apply (account state changes, no orders involved):
+LONGPORT_WATCHLIST_DRY_RUN=0 \
+  go run ./cmd/watchlist -action create -name tech -symbols 700.HK --confirm
+```
+
+| Flag | Default | Notes |
+| --- | --- | --- |
+| `-action` | `list` | `list create delete update pin`. |
+| `-name` | — | Required for `create`; optional rename on `update`. |
+| `-group-id` | — | Required for `update`, `delete`. |
+| `-symbols` | — | Required for `create` and `pin`. |
+| `-update-mode` | `add` | `add`, `remove` or `replace`. |
+| `-pin-mode` | `add` | `add` or `remove`. |
+| `-purge` | `false` | For `delete`: also delete the group's symbols. |
+| `-confirm` | `false` | **Required** for every write. |
+
+### `executions` — fills, order detail and buying power
+
+Read-only except `-action withdraw`, which is an order write under the order
+gate.
+
+```bash
+go run ./cmd/executions -action today-executions
+go run ./cmd/executions -action history-executions -days 30 -symbol 700.HK
+go run ./cmd/executions -action order-detail -order-id 1234567890
+go run ./cmd/executions -action max-purchase -symbol 700.HK -price 400.50
+go run ./cmd/executions -action margin-ratio -symbol 700.HK
+go run ./cmd/executions -action fund-positions
+go run ./cmd/executions -action cash-flow -days 7 -balance-type cash
+
+# Write (an order close — needs dry_run=0 AND --confirm-live AND mode=live):
+go run ./cmd/executions -action withdraw -order-id 1234567890
+```
+
+| Flag | Default | Notes |
+| --- | --- | --- |
+| `-action` | `today-executions` | See list above. |
+| `-symbol` | — | Filter, or required for `max-purchase` and `margin-ratio`. |
+| `-order-id` | — | Required for `order-detail` and `withdraw`. |
+| `-price` | `0` | Unit price for `max-purchase`; 0 means at market. |
+| `-side` | `Buy` | For `max-purchase`. |
+| `-type` | `LO` | Order type for `max-purchase`. |
+| `-days` | `7` | Lookback for `history-executions` and `cash-flow`. |
+| `-balance-type` | — | `cash`, `stock` or `fund`. |
+| `-page` / `-size` | `0` / `50` | `cash-flow` paging. |
+| `-confirm-live` | `false` | **Required** for `withdraw`. |
+
+`order-detail` prints the conditional-order fields (trigger price/status,
+trailing amounts), the commission-free and deduction status that decide final
+cost, the charge breakdown, and the history snapshot. Note the SDK's
+`OrderDetail.History` is a single `OrderHistoryDetail` struct, not a list, so
+one snapshot is printed.
+
+### `reference` — static and market-wide data
+
+Everything here is read-only, selectable by `-sections` so you can pull just
+the part you want.
+
+```bash
+go run ./cmd/reference                                       # default sections
+go run ./cmd/reference -sections static,list -market HK -list-limit 50
+go run ./cmd/reference -sections index -indexes last_done,pe_ttm,pb
+go run ./cmd/reference -sections flow,distribution -symbol 700.HK
+go run ./cmd/reference -sections session,participants,profile
+go run ./cmd/reference -sections realtime,history -symbol 700.HK
+go run ./cmd/reference -sections optionvol,filings -symbol 700.HK
+go run ./cmd/reference -sections short,counter
+```
+
+| Section | SDK methods | Notes |
+| --- | --- | --- |
+| `static` | `StaticInfo` | Lot size, share counts, EPS, dividend yield. |
+| `list` | `SecurityList` | Whole security list for a market. |
+| `index` | `CalcIndex` | Computed indices; names via `-indexes`. |
+| `flow` | `CapitalFlow` | Intraday capital flow, last 20 points. |
+| `distribution` | `CapitalDistribution` | Daily large/medium/small in and out. |
+| `session` | `TradingSession` | Per-market sessions, times as `HH:MM`. |
+| `participants` | `Participants` | Exchange broker ids and names. |
+| `profile` | `Profile` | Entitlements and rate limits (no HTTP call). |
+| `realtime` | `RealtimeQuote`, `RealtimeDepth`, `RealtimeTrades`, `Brokers` | HTTP snapshots of the push feeds. |
+| `history` | `HistoryCandlesticksByOffset`, `HistoryCandlesticksByDate` | Both paging styles. |
+| `optionvol` | `OptionVolume`, `OptionVolumeDaily` | Aggregate and daily put/call. |
+| `filings` | `Filings` | Regulatory documents and URLs. |
+| `brokers` | `RealtimeBrokers` | Broker queue snapshot. |
+| `short` | `ShortPositions`, `ShortTrades` | Short interest, US and HK. |
+| `counter` | `SymbolToCounterIds`, `ResolveCounterIds` | Both directions, chained. |
+
+| Flag | Default | Notes |
+| --- | --- | --- |
+| `-sections` | `static,index,session,participants,profile` | Comma-separated subset. |
+| `-symbols` | `700.HK,AAPL.US` | For `static`, `index`, `flow`, `realtime`, `counter`. |
+| `-symbol` | `700.HK` | Single symbol for the others. |
+| `-market` | `HK` | For `list`: `HK US CN SG UK`. |
+| `-indexes` | `last_done,change_rate,volume,turnover,pe_ttm,pb` | See `parseCalcIndexes` in the source for all ~45 names. |
+| `-history-count` | `10` | Candles for `history`. |
+| `-history-days` | `5` | Day range for `history` and `optionvol`. |
+| `-forward` | `false` | Look forward from today instead of back. |
+| `-short-count` | `10` | Records for `short`. |
+| `-list-limit` | `20` | Rows printed for `list`. |
+
+`profile` is the odd one out: `Profile()` takes no context and returns no
+error, because the entitlement arrives over the websocket at connect time. It
+therefore cannot fail the way the HTTP sections do, and may legitimately be
+empty on a very fast exit.
 
 ---
 
@@ -343,8 +609,9 @@ file` otherwise.
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
-| `LONGPORT_DRY_RUN` | `1` | Blocks all writes. Must be `0` to write. |
+| `LONGPORT_DRY_RUN` | `1` | Blocks all order writes. Must be `0` to write. |
 | `LONGPORT_MODE` | `simulated` | `simulated` or `live`. |
+| `LONGPORT_WATCHLIST_DRY_RUN` | `1` | Blocks watchlist writes. Must be `0` to write. See [the two gates](#the-two-safety-gates). |
 
 ### Secret handling
 
@@ -362,6 +629,46 @@ banner redacts the App Key only, keeping at most 4 leading characters:
 
 ---
 
+## SDK coverage
+
+This demo covers **every exported method on `QuoteContext` and
+`TradeContext`** — 66 method definitions, 62 distinct names. You can check
+that claim yourself without trusting this README:
+
+```console
+$ BASE=$(go env GOMODCACHE)/github.com/longbridge/openapi-go@v0.25.2
+$ grep -hoE '^func \(c \*(Quote|Trade)Context\) [A-Z][A-Za-z0-9]*' \
+    "$BASE"/quote/*.go "$BASE"/trade/*.go | sed -E 's/.*\) //' | sort -u \
+  | while read -r m; do
+      grep -rqE "\.$m\(" cmd/ || echo "UNCOVERED: $m"
+    done
+$ # (no output = fully covered)
+```
+
+This is a **static** check: it proves every method is *referenced*, not that
+every method was *exercised against a live account*. No command in this repo
+has been run with a working access token, so no successful response has ever
+been observed. See [Honest status](#honest-status).
+
+Not covered, and why:
+
+| Area | Context type | Methods | Why not |
+| --- | --- | --- | --- |
+| Fundamentals | `FundamentalContext` | 32 | Financial statements and valuation; needs a paid data entitlement to be useful. |
+| Share lists | `SharelistContext` | 8 | User share lists; write-shaped, same category as the watchlist. |
+| Research content | `ContentContext` | 7 | News and research documents. |
+| Screeners | `ScreenerContext` | 5 | Symbol screening. |
+| Portfolios | `PortfolioContext` | 5 | Multi-account portfolio aggregation. |
+| Price alerts | `AlertContext` | 4 | **All writes.** Would need its own third guard. |
+| Assets | `AssetContext` | 2 | Fund/NAV reference. |
+| Calendar | `CalendarContext` | 1 | `cmd/market` uses `TradingDays` from `QuoteContext` instead. |
+
+`AlertContext` is the interesting omission: every one of its four methods
+creates or cancels a price alert, so covering it would mean adding a third
+write gate. That is out of scope here rather than something that was forgotten.
+
+---
+
 ## Honest status
 
 **This project has never been run against a working Longbridge account.** It
@@ -371,21 +678,46 @@ What *was* verified by execution:
 
 - `gofmt -l .` reports nothing.
 - `go build ./...` and `go vet ./...` both exit 0.
-- All four binaries build; `-h` exits 0 with no credentials.
-- All four exit **2** with a readable missing-credentials message and no panic.
-- With dummy credentials, all four reach the real Longbridge API and fail
-  with `httpStatus:401 code:401004 message:token invalid` — proving the config,
-  signing and network path are genuinely wired, not stubbed.
-- Every write path is blocked in each of the three non-sending configurations.
+- All eight binaries build; `-h` exits 0 with no credentials.
+- All eight exit **2** with a readable missing-credentials message listing all
+  three variables, and no panic.
+- With dummy credentials, every command reaches the real Longbridge API and
+  fails with `httpStatus:401 code:401004 message:token invalid` — proving the
+  config, signing and network path are genuinely wired, not stubbed. This was
+  checked for all three `warrant` actions, `watchlist -action list`, all seven
+  read-only `executions` actions, and all eleven `reference` sections.
+- Every write path is blocked in each of the non-sending configurations, and
+  every refusal was confirmed to make **no** network call.
+- The static coverage check above finds no uncovered method.
+
+Specifically verified about the guards:
+
+| Command | Switches | Result |
+| --- | --- | --- |
+| `trade -action submit` | default | blocked: missing `--confirm-live`, no network |
+| `trade -action submit` | `DRY_RUN=0 --confirm-live` | blocked: mode is simulated, no network |
+| `trade -action cancel` | `--confirm-live` | blocked: dry run active, no network |
+| `executions -action withdraw` | default | blocked: missing `--confirm-live`, no network |
+| `executions -action withdraw` | `DRY_RUN=0 --confirm-live` | blocked: mode is simulated, no network |
+| `watchlist -action create` | default | blocked: missing `--confirm`, no network |
+| `watchlist -action create` | `--confirm` | blocked: watchlist dry run, no network |
+| `watchlist` create/update/pin/delete | `WATCHLIST_DRY_RUN=0 --confirm` | reached the API (401 on the dummy token) |
 
 What is **not** verified: the shape of successful responses, field-by-field
-rendering, option-chain content, intraday data, and whether any live order is
-accepted. The output formatting was written against the v0.25.2 type
-definitions in the module cache, so it should be correct, but "should be" is
-not "was observed". Expect to adjust column widths.
+rendering, column widths, and whether any live order is accepted. No command
+here has ever run against a working access token. The output formatting was
+written against the v0.25.2 type definitions in the module cache, so it should
+be correct, but "should be" is not "was observed". Expect to adjust column
+widths once real data flows.
 
-There is no automated test suite. There should be — the config loader in
-particular is testable without credentials and is the natural first target.
+This matters most for the newer sections, whose types are the least
+documented: the short-sale fields, the capital-flow points, the trading-session
+minute encoding and the option-volume strings are all rendered from the struct
+definitions alone.
+
+There is no automated test suite. There should be — the config loader and both
+guards in particular are testable without credentials and are the natural
+first target.
 
 ---
 
@@ -431,18 +763,23 @@ table in Longbridge's docs.
 ```
 longbridge-go-demo/
 ├── cmd/
-│   ├── quote/main.go     read-only market data snapshot
-│   ├── trade/main.go     account state + gated order writes
-│   ├── watch/main.go     realtime stream, graceful SIGINT
-│   └── market/main.go    status, calendar, intraday timeline
+│   ├── quote/main.go       read-only market data snapshot
+│   ├── trade/main.go       account state + gated order writes
+│   ├── watch/main.go       realtime stream, graceful SIGINT
+│   ├── market/main.go      status, calendar, intraday timeline
+│   ├── warrant/main.go     HK warrant list, quotes, issuers
+│   ├── watchlist/main.go   saved groups + separately gated edits
+│   ├── executions/main.go  fills, order detail, buying power, cash flow
+│   └── reference/main.go   static, market-wide and entitlement data
 ├── internal/
-│   ├── config/           env + YAML loader, mode/dry-run switch, redaction
-│   │   ├── config.go
+│   ├── config/             env + YAML loader, mode/dry-run switch, redaction
+│   │   ├── config.go       credentials, LONGPORT_MODE, order gate
+│   │   ├── guard.go        the separate watchlist gate
 │   │   └── file.go
-│   └── cli/              shared flag parsing, credential errors, panic guard
-├── .env.example          every LONGPORT_*/LONGBRIDGE_* var, fully commented
-├── config.example.yaml   YAML template, `longbridge:` block
-├── Makefile              build, fmt, fmt-check, vet, tidy
+│   └── cli/                shared flag parsing, credential errors, panic guard
+├── .env.example            every LONGPORT_*/LONGBRIDGE_* var, fully commented
+├── config.example.yaml     YAML template, `longbridge:` block
+├── Makefile                build, fmt, fmt-check, vet, tidy
 ├── go.mod / go.sum
 └── README.md
 ```

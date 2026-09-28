@@ -189,6 +189,11 @@ func Load(file string) (*Config, error) {
 	if err != nil {
 		return nil, err
 	}
+	// Same for the independent watchlist switch: fail at startup, not at the
+	// moment a write is silently refused.
+	if err := ValidateWatchlistDryRun(); err != nil {
+		return nil, err
+	}
 
 	opts := []sdk.Option{}
 	if usedFile != "" {

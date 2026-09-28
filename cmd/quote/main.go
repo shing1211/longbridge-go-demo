@@ -72,6 +72,9 @@ func main() {
 		if err := printDepth(ctx, qc, list); err != nil {
 			return err
 		}
+		if err := printTicks(ctx, qc, list, 10); err != nil {
+			return err
+		}
 		return printOptionChain(ctx, qc, chainSym, usSym)
 	})
 }
@@ -126,6 +129,28 @@ func printCandles(ctx context.Context, qc *quote.QuoteContext, symbols []string)
 			fmt.Printf("   %s  O=%-10s H=%-10s L=%-10s C=%-10s vol=%d turnover=%s\n",
 				cli.FmtTime(s.Timestamp), dec(s.Open), dec(s.High), dec(s.Low),
 				dec(s.Close), s.Volume, dec(s.Turnover))
+		}
+	}
+	return nil
+}
+
+// printTicks pulls the recent trade tape over HTTP. It is the pull-based
+// counterpart to the websocket tick stream in cmd/watch: same data, different
+// transport, so the two can be compared against each other.
+func printTicks(ctx context.Context, qc *quote.QuoteContext, symbols []string, count int32) error {
+	fmt.Printf("\n=== Recent trades (last %d per symbol) ===\n", count)
+	for _, sym := range symbols {
+		reqCtx, cancel := context.WithTimeout(ctx, cfgTimeout())
+		trades, err := qc.Trades(reqCtx, sym, count)
+		cancel()
+		if err != nil {
+			fmt.Printf("%-12s error: %v\n", sym, err)
+			continue
+		}
+		fmt.Printf("-- %s (%d ticks)\n", sym, len(trades))
+		for _, t := range trades {
+			fmt.Printf("   %s  price=%-10s vol=%-8d type=%s\n",
+				cli.FmtTime(t.Timestamp), t.Price, t.Volume, t.TradeType)
 		}
 	}
 	return nil
@@ -209,6 +234,42 @@ func printOptionChain(ctx context.Context, qc *quote.QuoteContext, hkSym, usSym 
 		}
 		if len(strikes) > len(shown) {
 			fmt.Printf("   ... %d more strikes\n", len(strikes)-len(shown))
+		}
+
+		// Quote the actual option contracts from the chain, not just the
+		// underlying: OptionQuote is the per-contract endpoint and carries
+		// the greeks and open interest that StrikePriceInfo does not.
+		contracts := make([]string, 0, len(shown)*2)
+		for _, s := range shown {
+			if s.CallSymbol != "" {
+				contracts = append(contracts, s.CallSymbol)
+			}
+			if s.PutSymbol != "" {
+				contracts = append(contracts, s.PutSymbol)
+			}
+		}
+		if len(contracts) == 0 {
+			continue
+		}
+		fmt.Println("   -- option contracts --")
+		optCtx, optCancel := context.WithTimeout(ctx, cfgTimeout())
+		opts, err := qc.OptionQuote(optCtx, contracts)
+		optCancel()
+		if err != nil {
+			fmt.Printf("   %-12s option quote error: %v\n", sym, err)
+			continue
+		}
+		fmt.Printf("   %-14s %-10s %-10s %-12s %-12s %-9s %s\n",
+			"CONTRACT", "LAST", "OPEN", "IV", "OI", "DIRECTION", "EXPIRY")
+		for _, o := range opts {
+			iv, dir, expiry, oi := "-", "-", "-", "0"
+			if e := o.OptionExtend; e != nil {
+				iv, dir, expiry = cli.OrDash(e.ImpliedVolatility),
+					cli.OrDash(e.Direction), cli.OrDash(e.ExpiryDate)
+				oi = fmt.Sprint(e.OpenInterest)
+			}
+			fmt.Printf("   %-14s %-10s %-10s %-12s %-12s %-9s %s\n",
+				o.Symbol, dec(o.LastDone), dec(o.Open), iv, oi, dir, expiry)
 		}
 	}
 	return nil

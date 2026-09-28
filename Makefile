@@ -1,6 +1,6 @@
 BIN        := bin
 GO         ?= go
-BINARIES   := quote trade watch market
+BINARIES   := quote trade watch market warrant watchlist executions reference
 CMDS       := $(addprefix ./cmd/,$(BINARIES))
 
 .PHONY: all
@@ -44,6 +44,22 @@ run-market: ## go run ./cmd/market
 .PHONY: run-watch
 run-watch: ## go run ./cmd/watch
 	$(GO) run ./cmd/watch
+
+.PHONY: run-warrant
+run-warrant: ## go run ./cmd/warrant
+	$(GO) run ./cmd/warrant
+
+.PHONY: run-watchlist
+run-watchlist: ## go run ./cmd/watchlist
+	$(GO) run ./cmd/watchlist
+
+.PHONY: run-executions
+run-executions: ## go run ./cmd/executions
+	$(GO) run ./cmd/executions
+
+.PHONY: run-reference
+run-reference: ## go run ./cmd/reference
+	$(GO) run ./cmd/reference
 
 .PHONY: clean
 clean: ## Remove build output
