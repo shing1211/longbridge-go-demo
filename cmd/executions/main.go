@@ -409,15 +409,18 @@ func doWithdraw(ctx context.Context, cfg *appcfg.Config, connect func() (*trade.
 
 	// Same three-way gate as cmd/trade. This is an order write, not a watchlist
 	// write, so it deliberately does NOT use GuardWatchlist.
+	//
+	// The refusal is returned, not swallowed: a blocked write must exit 3 so a
+	// script can tell it apart from a completed withdrawal.
 	if !confirmLive {
 		fmt.Fprintf(os.Stderr, "\nBLOCKED: missing --confirm-live\n")
 		fmt.Fprintf(os.Stderr, "DRY RUN: nothing was sent to Longbridge.\n")
-		return nil
+		return appcfg.Blockedf("missing --confirm-live")
 	}
 	if err := cfg.GuardWrite("withdraw an order"); err != nil {
 		fmt.Fprintf(os.Stderr, "\nBLOCKED: %v\n", err)
 		fmt.Fprintf(os.Stderr, "DRY RUN: nothing was sent to Longbridge.\n")
-		return nil
+		return err
 	}
 
 	tc, err := connect()

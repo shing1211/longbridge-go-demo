@@ -354,7 +354,7 @@ func (c *Config) GuardWrite(action string) error {
 		return errors.New("GuardWrite: action description is required")
 	}
 	if c.DryRun {
-		return fmt.Errorf(
+		return Blockedf(
 			"refusing to %s: DRY RUN is active (mode=%s).\n"+
 				"No order was sent. To actually submit orders you must set\n"+
 				"  LONGPORT_DRY_RUN=0\n"+
@@ -363,7 +363,7 @@ func (c *Config) GuardWrite(action string) error {
 			action, c.Mode)
 	}
 	if c.Mode == ModeSimulated {
-		return fmt.Errorf(
+		return Blockedf(
 			"refusing to %s: mode is \"simulated\" but dry run is disabled.\n"+
 				"No order was sent. Either restore LONGPORT_DRY_RUN=1, or set\n"+
 				"  LONGPORT_MODE=live\n"+

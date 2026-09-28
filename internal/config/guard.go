@@ -8,6 +8,44 @@ import (
 	"strings"
 )
 
+// ExitBlocked is the process exit status used when a safety guard refuses a
+// write. It is the ONLY status that means "your write did not happen".
+//
+// # WHY 3
+//
+// 0 and 1 are already taken: 0 is success, 1 is a generic failure, and 2 is
+// the missing-credentials / usage status that cli.Fail assigns. A refusal is
+// none of those: the command did not fail, it correctly declined to act. Before
+// this constant existed, blocked writes returned nil and therefore exited 0,
+// which made a refusal indistinguishable from a completed order to any wrapper
+// script. 3 is also the convention already used by the sibling Tiger project,
+// so the two repos agree.
+//
+// Any command that guards a write MUST return an error wrapping ErrBlocked
+// when the guard refuses, so that cli.Fail turns it into this status.
+const ExitBlocked = 3
+
+// ErrBlocked is the sentinel that every guard refusal wraps. Call it with
+// Blockedf, which produces both the human-readable reason and the sentinel.
+var ErrBlocked = errors.New("blocked by safety guard")
+
+// BlockedError is a guard refusal: a write that was deliberately not sent.
+type BlockedError struct {
+	Reason string
+}
+
+func (e *BlockedError) Error() string { return e.Reason }
+
+// Unwrap ties every refusal to ErrBlocked, so a caller can use errors.Is
+// instead of matching on message text.
+func (e *BlockedError) Unwrap() error { return ErrBlocked }
+
+// Blockedf builds a guard refusal. The caller must treat the result as
+// "make no network call" and propagate it rather than swallowing it.
+func Blockedf(format string, args ...any) error {
+	return &BlockedError{Reason: fmt.Sprintf(format, args...)}
+}
+
 // GuardWatchlist is the safety gate for watchlist MUTATIONS.
 //
 // # WHY THIS IS SEPARATE FROM GuardWrite
@@ -41,7 +79,7 @@ func (c *Config) GuardWatchlist(action string) error {
 		return errors.New("GuardWatchlist: action description is required")
 	}
 	if WatchlistDryRun() {
-		return fmt.Errorf(
+		return Blockedf(
 			"refusing to %s: watchlist DRY RUN is active.\n"+
 				"No change was sent. Watchlist writes mutate your account's\n"+
 				"saved groups, so they are guarded separately from orders.\n"+

@@ -19,11 +19,26 @@ import (
 	appcfg "github.com/shing1211/longbridge-go-demo/internal/config"
 )
 
-// Fail prints a credential/configuration problem to stderr with usage and
-// exits with status 2. Anything that is not a usage problem exits 1.
+// Fail prints a problem to stderr and exits. Three statuses are distinguished,
+// and the distinction matters to anyone scripting this repo:
+//
+//	0  success — the command did what it was asked
+//	2  missing credentials or a usage error (a MissingCredentialError)
+//	3  BLOCKED — a safety guard refused a write; nothing was sent
+//	1  anything else, including failures from the real API
+//
+// A guard refusal must never collapse into 0: the whole point of the gate is
+// that a script wrapping it can tell "I placed the order" from "the demo
+// declined to place it".
 func Fail(err error) {
 	if err == nil {
 		return
+	}
+	// Checked before the generic path, since BlockedError is also a plain
+	// error and would otherwise be reported as an ordinary failure (1).
+	if errors.Is(err, appcfg.ErrBlocked) {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(appcfg.ExitBlocked)
 	}
 	var missing *appcfg.MissingCredentialError
 	if errors.As(err, &missing) {

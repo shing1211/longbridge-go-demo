@@ -295,8 +295,8 @@ func doSubmit(ctx context.Context, cfg *appcfg.Config, connect func() (*trade.Tr
 		"remark":     order.Remark,
 	})
 
-	if !gate(cfg, confirmLive, "submit an order") {
-		return nil
+	if err := gate(cfg, confirmLive, "submit an order"); err != nil {
+		return err
 	}
 
 	tc, err := connect()
@@ -345,8 +345,8 @@ func doReplace(ctx context.Context, cfg *appcfg.Config, connect func() (*trade.T
 		"remark":   replace.Remark,
 	})
 
-	if !gate(cfg, confirmLive, "replace an order") {
-		return nil
+	if err := gate(cfg, confirmLive, "replace an order"); err != nil {
+		return err
 	}
 
 	tc, err := connect()
@@ -371,8 +371,8 @@ func doCancel(ctx context.Context, cfg *appcfg.Config, connect func() (*trade.Tr
 
 	describe("CancelOrder", map[string]string{"order_id": orderID})
 
-	if !gate(cfg, confirmLive, "cancel an order") {
-		return nil
+	if err := gate(cfg, confirmLive, "cancel an order"); err != nil {
+		return err
 	}
 
 	tc, err := connect()
@@ -392,26 +392,34 @@ func doCancel(ctx context.Context, cfg *appcfg.Config, connect func() (*trade.Tr
 
 // guard is the single choke point for writes. It returns nil only when a real
 // submission is authorised; any error must be treated as "do not call the SDK".
+//
+// Both refusals are *BlockedError, so a blocked write exits 3 rather than 0.
+// The flag check and the GuardWrite check are independent: passing
+// --confirm-live without clearing the env still blocks, and vice versa.
 func guard(cfg *appcfg.Config, confirmed bool, action string) error {
 	if !confirmed {
-		return fmt.Errorf("missing --confirm-live")
+		return appcfg.Blockedf(
+			"missing --confirm-live\n" +
+				"Pass --confirm-live together with LONGPORT_DRY_RUN=0 and\n" +
+				"LONGPORT_MODE=live. All three are required.")
 	}
 	return cfg.GuardWrite(action)
 }
 
-// gate prints the request, evaluates the guard, and reports why a write was
-// blocked. It returns true when the caller may proceed.
+// gate evaluates the guard for a write and reports why it was blocked.
 //
-// The reason is printed to stderr on purpose: a silent refusal looks like a
-// crash, and "nothing happened" is exactly the message a safety gate must not
-// leave unexplained.
-func gate(cfg *appcfg.Config, confirmed bool, action string) bool {
+// The reason goes to stderr deliberately: a silent refusal looks like a crash,
+// and "nothing happened" is exactly the message a safety gate must not leave
+// unexplained. The BlockedError is RETURNED rather than swallowed, so that the
+// process exits 3 and a caller can distinguish a refusal from a completed
+// order.
+func gate(cfg *appcfg.Config, confirmed bool, action string) error {
 	if err := guard(cfg, confirmed, action); err != nil {
 		fmt.Fprintf(os.Stderr, "\nBLOCKED: %v\n", err)
 		fmt.Fprintf(os.Stderr, "DRY RUN: nothing was sent to Longbridge.\n")
-		return false
+		return err
 	}
-	return true
+	return nil
 }
 
 func describe(op string, fields map[string]string) {

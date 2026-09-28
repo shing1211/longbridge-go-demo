@@ -164,8 +164,8 @@ func doCreate(ctx context.Context, cfg *appcfg.Config, connect func() (*quote.Qu
 		"name":    groupName,
 		"symbols": strings.Join(syms, ","),
 	})
-	if !gate(cfg, "create a watchlist group") {
-		return nil
+	if err := gate(cfg, "create a watchlist group"); err != nil {
+		return err
 	}
 
 	qc, err := connect()
@@ -192,8 +192,8 @@ func doDelete(ctx context.Context, cfg *appcfg.Config, connect func() (*quote.Qu
 		"group_id": strconv.FormatInt(groupID, 10),
 		"purge":    strconv.FormatBool(purge),
 	})
-	if !gate(cfg, fmt.Sprintf("delete watchlist group %d", groupID)) {
-		return nil
+	if err := gate(cfg, fmt.Sprintf("delete watchlist group %d", groupID)); err != nil {
+		return err
 	}
 
 	qc, err := connect()
@@ -226,8 +226,8 @@ func doUpdate(ctx context.Context, cfg *appcfg.Config, connect func() (*quote.Qu
 		"mode":     string(mode),
 		"symbols":  strings.Join(syms, ","),
 	})
-	if !gate(cfg, fmt.Sprintf("update watchlist group %d", groupID)) {
-		return nil
+	if err := gate(cfg, fmt.Sprintf("update watchlist group %d", groupID)); err != nil {
+		return err
 	}
 
 	qc, err := connect()
@@ -263,8 +263,8 @@ func doPin(ctx context.Context, cfg *appcfg.Config, connect func() (*quote.Quote
 		"mode":    mode.String(),
 		"symbols": strings.Join(syms, ","),
 	})
-	if !gate(cfg, "pin or unpin symbols") {
-		return nil
+	if err := gate(cfg, "pin or unpin symbols"); err != nil {
+		return err
 	}
 
 	qc, err := connect()
@@ -283,26 +283,27 @@ func doPin(ctx context.Context, cfg *appcfg.Config, connect func() (*quote.Quote
 
 // ------------------------------------------------------------------- helpers
 
-// gate is the watchlist choke point. It returns true only when the caller may
-// proceed; on refusal it explains why and guarantees no request was made.
+// gate is the watchlist choke point. It returns nil only when the caller may
+// proceed; on refusal it explains why, guarantees no request was made, and
+// returns a *BlockedError so the process exits 3 rather than 0.
 //
 // The reason goes to stderr deliberately: a silent no-op looks like a crash,
 // and "nothing happened" is exactly the message a safety gate must never leave
 // unexplained.
-func gate(cfg *appcfg.Config, action string) bool {
+func gate(cfg *appcfg.Config, action string) error {
 	if !confirm {
 		fmt.Fprintf(os.Stderr, "\nBLOCKED: missing --confirm\n")
 		fmt.Fprintf(os.Stderr, "DRY RUN: nothing was sent to Longbridge.\n")
 		fmt.Fprintf(os.Stderr, "Watchlist writes are guarded separately from orders; pass\n")
 		fmt.Fprintf(os.Stderr, "  --confirm   together with   LONGPORT_WATCHLIST_DRY_RUN=0\n")
-		return false
+		return appcfg.Blockedf("missing --confirm")
 	}
 	if err := cfg.GuardWatchlist(action); err != nil {
 		fmt.Fprintf(os.Stderr, "\nBLOCKED: %v\n", err)
 		fmt.Fprintf(os.Stderr, "DRY RUN: nothing was sent to Longbridge.\n")
-		return false
+		return err
 	}
-	return true
+	return nil
 }
 
 // describe prints the exact call that would be made, in deterministic key
