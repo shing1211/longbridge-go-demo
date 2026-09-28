@@ -4,7 +4,7 @@ A small, complete, safety-gated demo of the **Longbridge (Longport) OpenAPI**
 using the official Go SDK, [`github.com/longbridge/openapi-go`](https://pkg.go.dev/github.com/longbridge/openapi-go)
 at **v0.25.2**.
 
-Eleven commands, one shared config loader, and a hard rule that no order can be
+Twelve commands, one shared config loader, and a hard rule that no order can be
 sent unless you say so three different ways.
 
 **SDK coverage: every exported method on `QuoteContext` and `TradeContext` is
@@ -16,9 +16,9 @@ types. See [Coverage](#sdk-coverage) for the command that verifies this.
 The SDK has 130 context methods in total across ten context types. Of the
 other 64, this demo now also covers `SharelistContext` (3 of 8 read methods),
 `ContentContext` (5 of 7 read methods) and `PortfolioContext` (all 5). Still
-unused: `FundamentalContext` (32), `ScreenerContext` (5), `AlertContext` (4),
-`AssetContext` (2) and `CalendarContext` (1) — fundamentals, screeners, price
-alerts, fund reference and the trading calendar. See
+unused: `ScreenerContext` (5) and `AlertContext` (4) — screeners and price
+alerts. `FundamentalContext` (32), `AssetContext` (2) and `CalendarContext` (1)
+are now fully covered by `cmd/fundamentals`. See
 [Coverage](#sdk-coverage) for the exact list and the reason for each omission.
 
 > **Status: not yet tested against the live API.** See
@@ -76,6 +76,8 @@ go run ./cmd/reference                     # static + market-wide reference data
 go run ./cmd/sharelist                     # your share lists, popular lists
 go run ./cmd/content -action news          # research news for a symbol
 go run ./cmd/portfolio -action summary     # account-level P&L analytics
+go run ./cmd/fundamentals -action company   # company fundamentals, ratings, valuation
+go run ./cmd/fundamentals -action calendar  # financial calendar
 ```
 
 Every binary prints usage with `-h` and needs **no** credentials for that:
@@ -739,6 +741,109 @@ to `-limit`.
 
 ---
 
+### `fundamentals` — fundamentals, statements and calendar (read-only)
+
+The largest single block in the SDK: all **32** `FundamentalContext` methods,
+both `AssetContext` methods and the one `CalendarContext` method. One `-action`
+per SDK method, so each is reachable on its own.
+
+```bash
+go run ./cmd/fundamentals -action company -symbol 700.HK
+go run ./cmd/fundamentals -action valuation -symbol 700.HK
+go run ./cmd/fundamentals -action all-symbol -symbol 700.HK   # the main set at once
+go run ./cmd/fundamentals -action report -kind is -period af
+go run ./cmd/fundamentals -action rating
+go run ./cmd/fundamentals -action consensus
+go run ./cmd/fundamentals -action valuation-compare -peers MSFT.US,GOOGL.US
+go run ./cmd/fundamentals -action etf-allocation -symbol 3067.HK
+go run ./cmd/fundamentals -action macro-indicators -symbol 700.US
+go run ./cmd/fundamentals -action statements                      # account's own
+go run ./cmd/fundamentals -action calendar -calendar-category dividend
+```
+
+| Action | SDK method | Notes |
+| --- | --- | --- |
+| `report` | `FinancialReport` | Raw JSON; the indicator tree is untyped in the SDK. |
+| `rating` | `InstitutionRating` | Two endpoints combined; fails if either does. |
+| `rating-detail` | `InstitutionRatingDetail` | Weekly rating and target-price history. |
+| `rating-views` | `InstitutionRatingViews` | Counts here are **strings**, not ints. |
+| `forecast-eps` | `ForecastEps` | Forecast windows with institution counts. |
+| `consensus` | `Consensus` | Per-period actual vs estimate. |
+| `snapshot` | `FinancialReportSnapshot` | Forecast-vs-reported earnings block. |
+| `operating` | `Operating` | Management-discussion reports and indicators. |
+| `dividend` | `Dividend` | |
+| `dividend-detail` | `DividendDetail` | Same return type, different endpoint. |
+| `corp-action` | `CorpAction` | Dividends, splits, buybacks. |
+| `buyback` | `Buyback` | TTM summary, history, ratios. |
+| `valuation` | `Valuation` | PE/PB/PS/yield. |
+| `valuation-history` | `ValuationHistory` | PE/PB/PS only — **no** yield. |
+| `industry-valuation` | `IndustryValuation` | Peer table. |
+| `industry-valuation-dist` | `IndustryValuationDist` | Percentile within the industry. |
+| `valuation-compare` | `ValuationComparison` | Takes a peer **list** and a currency. |
+| `company` | `Company` | Full profile and registration data. |
+| `executive` | `Executive` | Board and management. |
+| `segments` | `BusinessSegments` | Latest split. |
+| `segments-history` | `BusinessSegmentsHistory` | Business **and** regional breakdowns. |
+| `ratings` | `Ratings` | Scores are raw JSON (int, float or null). |
+| `shareholder` | `Shareholder` | Major holders and cross-holdings. |
+| `shareholder-top` | `ShareholderTop` | Raw JSON; no struct in the SDK. |
+| `shareholder-detail` | `ShareholderDetail` | Needs `-object-id`. |
+| `fund-holder` | `FundHolder` | `PositionRatio` is a non-pointer decimal. |
+| `invest-relation` | `InvestRelation` | What *this* company holds in others. |
+| `etf-allocation` | `EtfAssetAllocation` | Holdings/region/asset-class/industry. |
+| `industry-rank` | `IndustryRank` | **Market**-wide, not per symbol. |
+| `industry-peers` | `IndustryPeers` | Recursive peer chain. |
+| `macro-indicators` | `MacroeconomicIndicators` | `/v2/quote/macrodata`. |
+| `macro` | `Macroeconomic` | Needs `-indicator-code`. |
+| `statements` | `AssetContext.Statements` | Account statements, daily or monthly. |
+| `statement-url` | `AssetContext.StatementDownloadURL` | Prints the presigned URL; never fetches it. |
+| `calendar` | `CalendarContext.FinanceCalendar` | Window defaults to today + 30 days. |
+| `all-symbol` | — | Runs the main per-symbol set in order. |
+
+| Flag | Default | Notes |
+| --- | --- | --- |
+| `-symbol` | `700.HK` | The symbol for nearly every action. |
+| `-action` | `valuation` | See the table above. |
+| `-kind` | `all` | `report`: `is`, `bs`, `cf`, `all`. |
+| `-period` | — | `report`: `af`, `saf`, `q1`, `q2`, `q3`, `qf`, `3q`. |
+| `-peers` | `MSFT.US,GOOGL.US` | Peer list for `valuation-compare`; also the fuzzy keyword filter for `macro-indicators`. |
+| `-currency` | `USD` | For `valuation-compare`. |
+| `-report` / `-fiscal-year` / `-fiscal-period` | — / `0` / — | Passed through to `segments-history` and `snapshot`. |
+| `-cate` | — | Category filter for `segments-history`. |
+| `-indicator` | `0` | `industry-rank`: `0`–`7`. Numeric on purpose — the SDK defines no names for these codes. |
+| `-sort-type` | `1` | `industry-rank`: `0` ascending, `1` descending. |
+| `-limit` | `20` | Row cap for `industry-rank`, `macro-indicators`, `macro`. |
+| `-object-id` | `0` | **Required** for `shareholder-detail`. |
+| `-statement-type` | `daily` | `daily` or `monthly`. |
+| `-page` / `-page-size` | `1` / `20` | For `statements`. |
+| `-file-key` | — | **Required** for `statement-url`. |
+| `-calendar-category` | `report` | `report`, `dividend`, `split`, `ipo`, `macrodata`, `closed`, `meeting`, `merge`. |
+| `-calendar-start` / `-calendar-end` | today / +30d | `YYYY-MM-DD`; an end before the start is rejected. |
+| `-calendar-market` | — | Optional market filter. |
+| `-indicator-code` | — | **Required** for `macro`. |
+| `-macro-start` / `-macro-end` / `-macro-offset` | — / — / `0` | For `macro`. |
+
+Every monetary field in this package is a `*decimal.Decimal` and arrives on the
+wire as a **JSON string**, so `nil` ("the API did not supply this") is
+distinguishable from zero. The output renders `-` for absent rather than
+`0.00`, for the reason given under `portfolio`.
+
+`-action statement-url` prints a presigned URL and deliberately does not fetch
+it: the URL embeds a signature, and downloading account statements is outside
+what this read-only demo does.
+
+`FinancialReport`, `ShareholderTop` and `ShareholderDetail` return
+`json.RawMessage` because the SDK does not type those payloads. They are
+pretty-printed and clipped at 4 KB with an explicit `…(truncated, N bytes
+total)` marker, so a cut-off block is never mistaken for a complete one.
+
+This binary additionally asserts the order gate is still **closed** at startup,
+exactly like the other readers: if you somehow run it with `LONGPORT_DRY_RUN=0`
+and `LONGPORT_MODE=live`, it refuses to run at all rather than proceeding in a
+misconfigured environment.
+
+---
+
 ## Configuration reference
 
 Precedence: **environment variables beat the YAML file**, and the YAML file is
@@ -816,6 +921,19 @@ $ grep -hoE '^func \(c \*(Quote|Trade)Context\) [A-Z][A-Za-z0-9]*' \
 $ # (no output = fully covered)
 ```
 
+The same check for `FundamentalContext`, `AssetContext` and `CalendarContext`
+(35 methods, all in `cmd/fundamentals`):
+
+```console
+$ grep -hoE '^func \(c \*(Fundamental|Asset|Calendar)Context\) [A-Z][A-Za-z0-9]*' \
+    "$BASE"/fundamental/*.go "$BASE"/asset/*.go "$BASE"/calendar/*.go \
+  | sed -E 's/.*\) //' | sort -u \
+  | while read -r m; do
+      grep -rqE "\.$m\(" cmd/ || echo "UNCOVERED: $m"
+    done
+$ # (no output = fully covered)
+```
+
 This is a **static** check: it proves every method is *referenced*, not that
 every method was *exercised against a live account*. No command in this repo
 has been run with a working access token, so no successful response has ever
@@ -825,14 +943,14 @@ Not covered, and why:
 
 | Area | Context type | Methods | Covered | Why not |
 | --- | --- | --- | --- | --- |
-| Fundamentals | `FundamentalContext` | 32 | 0 | Financial statements and valuation; needs a paid data entitlement to be useful. |
+| Fundamentals | `FundamentalContext` | 32 | 32 | Fully covered by `cmd/fundamentals`. |
 | Share lists | `SharelistContext` | 8 | 3 | The 5 uncovered are **writes** (`Create`, `Delete`, `AddSecurities`, `RemoveSecurities`, `SortSecurities`) and would need a third gate. |
 | Research content | `ContentContext` | 7 | 5 | The 2 uncovered are `CreateTopic` and `CreateTopicReply`, both writes. |
 | Screeners | `ScreenerContext` | 5 | 0 | Symbol screening. |
 | Portfolios | `PortfolioContext` | 5 | 5 | Fully covered. |
 | Price alerts | `AlertContext` | 4 | 0 | **All writes.** Would need its own third guard. |
-| Assets | `AssetContext` | 2 | 0 | Fund/NAV reference. |
-| Calendar | `CalendarContext` | 1 | 0 | `cmd/market` uses `TradingDays` from `QuoteContext` instead. |
+| Assets | `AssetContext` | 2 | 2 | Fully covered by `cmd/fundamentals`. |
+| Calendar | `CalendarContext` | 1 | 1 | Fully covered by `cmd/fundamentals`. `cmd/market` also has `TradingDays` from `QuoteContext`. |
 
 The rule the omissions follow is simple: **this demo only calls methods that
 cannot mutate server state, and every method that does mutate is left alone
@@ -855,16 +973,16 @@ What *was* verified by execution:
 
 - `gofmt -l .` reports nothing.
 - `go build ./...` and `go vet ./...` both exit 0.
-- All eleven binaries build; `-h` exits 0 with no credentials.
-- All eleven exit **2** with a readable missing-credentials message listing all
+- All twelve binaries build; `-h` exits 0 with no credentials.
+- All twelve exit **2** with a readable missing-credentials message listing all
   three variables, and no panic.
 - With dummy credentials, every command reaches the real Longbridge API and
   fails with `httpStatus:401 code:401004 message:token invalid` — proving the
   config, signing and network path are genuinely wired, not stubbed. This was
   checked for all three `warrant` actions, `watchlist -action list`, all seven
   read-only `executions` actions, all eleven `reference` sections, all fourteen
-  `market` sections, all three `sharelist` actions, all five `content` actions
-  and all five `portfolio` actions.
+  `market` sections, all three `sharelist` actions, all five `content` actions,
+  all five `portfolio` actions and all **thirty-three** `fundamentals` actions.
 - Every write path is blocked in each of the non-sending configurations, and
   every refusal was confirmed to make **no** network call.
 - The static coverage check above finds no uncovered method.
@@ -901,6 +1019,27 @@ rank-category JSON and the portfolio P&L credit/debit/fee lines are all
 rendered from the struct definitions alone. `RankCategories` in particular
 returns an opaque `json.RawMessage`, so its rendering is a pretty-printer and
 not a field mapping at all.
+
+`cmd/fundamentals` is the largest such case, and it is worth being blunt about
+what "covered" means there. Every one of the 32 fundamental methods, both asset
+methods and the calendar method was checked to be a plain `GET` against the
+v0.25.2 source, so the read-only claim is a source fact rather than an
+assumption. But the field names, the shape of each table and every column width
+come from the Go struct definitions alone. **No successful fundamental response
+has ever been observed.** Several of these payloads are barely documented even
+upstream, and three of them (`FinancialReport`, `ShareholderTop`,
+`ShareholderDetail`) are `json.RawMessage` in the SDK precisely because the
+shape is not stable — so for those, the output is a pretty-printer, not a
+mapping, and the true field set is unknown until someone runs it with a real
+token. Expect to adjust this command more than any other in the repo.
+
+One pre-existing wrinkle worth flagging, found while re-checking the guards: a
+**blocked** write in `cmd/trade` and `cmd/executions` exits **0**, because the
+gate prints its refusal to stderr and then returns `nil` rather than an error.
+The refusal is loud and correct, and it genuinely makes no network call, but
+the exit code does not distinguish "blocked" from "succeeded". If you script
+around this repo, check the output text, not just `$?`. This was left as-is
+because those files are outside the scope of the fundamentals work.
 
 There is no automated test suite. There should be — the config loader and both
 guards in particular are testable without credentials and are the natural
@@ -960,7 +1099,10 @@ longbridge-go-demo/
 │   ├── reference/main.go   static, market-wide and entitlement data
 │   ├── sharelist/main.go   share lists: list, detail, popular (reads only)
 │   ├── content/main.go     topics, news, topic detail, replies, my topics
-│   └── portfolio/main.go   exchange rates and P&L analytics
+│   ├── portfolio/main.go   exchange rates and P&L analytics
+│   └── fundamentals/       the 32 fundamental methods, + asset & calendar
+│       ├── main.go         flags, validation, action dispatch
+│       └── actions.go      one renderer per SDK method
 ├── internal/
 │   ├── config/             env + YAML loader, mode/dry-run switch, redaction
 │   │   ├── config.go       credentials, LONGPORT_MODE, order gate

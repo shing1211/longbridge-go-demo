@@ -61,6 +61,10 @@ run-executions: ## go run ./cmd/executions
 run-reference: ## go run ./cmd/reference
 	$(GO) run ./cmd/reference
 
+.PHONY: run-fundamentals
+run-fundamentals: ## go run ./cmd/fundamentals
+	$(GO) run ./cmd/fundamentals
+
 .PHONY: run-sharelist
 run-sharelist: ## go run ./cmd/sharelist
 	$(GO) run ./cmd/sharelist
