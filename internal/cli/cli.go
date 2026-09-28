@@ -14,7 +14,7 @@ import (
 	"syscall"
 	"time"
 
-	appcfg "github.com/tchan/longbridge-go-demo/internal/config"
+	appcfg "github.com/shing1211/longbridge-go-demo/internal/config"
 )
 
 // Fail prints a credential/configuration problem to stderr with usage and

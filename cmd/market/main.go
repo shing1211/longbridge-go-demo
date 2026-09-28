@@ -16,8 +16,8 @@ import (
 	"github.com/longbridge/openapi-go/quote"
 	"github.com/shopspring/decimal"
 
-	"github.com/tchan/longbridge-go-demo/internal/cli"
-	appcfg "github.com/tchan/longbridge-go-demo/internal/config"
+	"github.com/shing1211/longbridge-go-demo/internal/cli"
+	appcfg "github.com/shing1211/longbridge-go-demo/internal/config"
 )
 
 var (

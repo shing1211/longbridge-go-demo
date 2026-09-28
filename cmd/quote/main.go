@@ -14,8 +14,8 @@ import (
 	"github.com/longbridge/openapi-go/quote"
 	"github.com/shopspring/decimal"
 
-	"github.com/tchan/longbridge-go-demo/internal/cli"
-	appcfg "github.com/tchan/longbridge-go-demo/internal/config"
+	"github.com/shing1211/longbridge-go-demo/internal/cli"
+	appcfg "github.com/shing1211/longbridge-go-demo/internal/config"
 )
 
 // Flag values are registered in main so that -h can describe them without

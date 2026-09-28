@@ -1,4 +1,4 @@
-module github.com/tchan/longbridge-go-demo
+module github.com/shing1211/longbridge-go-demo
 
 go 1.24.0
 
