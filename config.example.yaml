@@ -1,0 +1,67 @@
+# Longbridge OpenAPI — YAML configuration template
+#
+# Copy to config.yaml and fill in. config.yaml is gitignored; never commit
+# real values. The file is auto-detected when it sits in the working
+# directory, or you can point at it explicitly:
+#
+#   go run ./cmd/quote -config ./config.yaml
+#
+# Precedence: environment variables override anything set here. Only the three
+# credential fields below are read by this demo's loader; every other field is
+# passed through to the official SDK, which parses the same `longbridge:` block.
+#
+# The top-level key MUST be `longbridge:` (lowercase). The SDK errors out with
+# "Longbridge config is not exist in yaml file" if it is missing.
+#
+# For a SIMULATED account, use the credential triple issued for that
+# simulated account — not your live one.
+
+longbridge:
+  # From https://open.longbridge.com/ -> User Center -> Application credential.
+  app_key: your_app_key
+
+  # SECRET. Anyone with app_key + app_secret can sign API requests.
+  app_secret: your_app_secret
+
+  # SECRET. This authorises trading. It is the legacy Access Token from User
+  # Center, NOT an OAuth access token.
+  access_token: your_access_token
+
+  # --- optional passthrough to the SDK -------------------------------------
+  # Each key below maps to the same-named Config field in the SDK.
+  # Leave commented unless you have a specific reason to change it.
+
+  # Access point. "cn" switches to openapi.longbridge.cn. US accounts must
+  # not use cn.
+  # region: cn
+
+  # Language for localized fields: en, zh-CN, zh-HK.
+  # language: en
+
+  # Allow 24-hour US overnight trading.
+  # enable_overnight: false
+
+  # Endpoint overrides, if you are behind a proxy or testing locally.
+  # http_url: https://openapi.longbridge.com
+  # quote_url: wss://openapi-quote.longbridge.com/v2
+  # trade_url: wss://openapi-trade.longbridge.com/v2
+
+  # Durations use Go syntax.
+  # http_timeout: 15s
+  # auth_timeout: 15s
+  # timeout: 15s
+
+  # SDK log level: trace, debug, info, warn, error.
+  # log_level: info
+
+# ---------------------------------------------------------------------------
+# DEMO SAFETY SWITCHES
+#
+# These are read from the ENVIRONMENT only — the SDK has no such fields, so
+# they deliberately do not live in this file. Put them in .env or export them:
+#
+#   LONGPORT_DRY_RUN=1     # default; blocks every order write
+#   LONGPORT_MODE=simulated
+#
+# See .env.example for the full commented list.
+# ---------------------------------------------------------------------------

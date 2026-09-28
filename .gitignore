@@ -1,0 +1,30 @@
+# Real credentials — never commit.
+.env
+.env.*
+!.env.example
+
+# Local config with real values.
+config.yaml
+config.local.yaml
+config.yml
+config.toml
+!config.example.yaml
+
+# Compiled binaries
+/bin/
+/dist/
+quote
+trade
+watch
+market
+
+# Go
+*.test
+*.out
+coverage.*
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/
+*.swp
