@@ -10,13 +10,16 @@ config.yml
 config.toml
 !config.example.yaml
 
-# Compiled binaries
+# Compiled binaries: the ./bin/ output dir, plus the bare command names that
+# `go build` produces in the repo root. Anchor with a leading slash so these
+# do not also match ./cmd/quote/main.go and friends.
 /bin/
 /dist/
-quote
-trade
-watch
-market
+/quote
+/trade
+/watch
+/market
+/longbridge-go-demo
 
 # Go
 *.test
