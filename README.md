@@ -34,7 +34,7 @@ are now fully covered by `cmd/fundamentals`. See
 - [What you need to fill in](#what-you-need-to-fill-in)
 - [Simulated vs live — read this](#simulated-vs-live--read-this)
 - [Dry-run semantics and the safety gate](#dry-run-semantics-and-the-safety-gate)
-- [The two safety gates](#the-two-safety-gates)
+- [The four safety gates](#the-four-safety-gates)
 - [Commands](#commands)
 - [Configuration reference](#configuration-reference)
 - [SDK coverage](#sdk-coverage)
@@ -194,7 +194,8 @@ A write happens only when **all three** of these hold:
 3. `LONGPORT_MODE=live`
 
 Otherwise the command prints the exact request it *would* have sent, prints
-why it was blocked, and exits **0** without opening a connection.
+why it was blocked, and exits **3** without opening a connection. Exit 3 is
+reserved for "a safety guard refused this write" — see `config.ExitBlocked`.
 
 Verified matrix (credentials were dummy, so anything that got through would
 have failed at auth — it did not):
@@ -233,19 +234,20 @@ add a new write operation, copy the existing `gate(...)` shape.
 
 ---
 
-## The two safety gates
+## The four safety gates
 
-This demo guards two different kinds of mutation with two **separate**,
-independently-defaulted gates. They are not interchangeable, and neither one
-opens the other.
+This demo guards four different kinds of mutation with four **separate**,
+independently-defaulted gates. They are not interchangeable, and none of them
+opens another.
 
-| | Order gate | Watchlist gate |
-| --- | --- | --- |
-| Guards | `SubmitOrder`, `ReplaceOrder`, `CancelOrder`, `WithdrawOrder` | `CreateWatchlistGroup`, `DeleteWatchlistGroup`, `UpdateWatchlistGroup`, `UpdatePinned` |
-| Env switch | `LONGPORT_DRY_RUN` (default `1`) | `LONGPORT_WATCHLIST_DRY_RUN` (default `1`) |
-| Flag | `--confirm-live` | `--confirm` |
-| Also requires | `LONGPORT_MODE=live` | — |
-| Implementation | `config.GuardWrite` | `config.GuardWatchlist` |
+| | Order gate | Watchlist gate | Sharelist gate | Content gate |
+| --- | --- | --- | --- | --- |
+| Guards | `SubmitOrder`, `ReplaceOrder`, `CancelOrder`, `WithdrawOrder` | `CreateWatchlistGroup`, `DeleteWatchlistGroup`, `UpdateWatchlistGroup`, `UpdatePinned` | `Create`, `Delete`, `AddSecurities`, `RemoveSecurities`, `SortSecurities` | `CreateTopic`, `CreateTopicReply` |
+| Env switch | `LONGPORT_DRY_RUN` (default `1`) | `LONGPORT_WATCHLIST_DRY_RUN` (default `1`) | `LONGPORT_SHARELIST_DRY_RUN` (default `1`) | `LONGPORT_CONTENT_DRY_RUN` (default `1`) |
+| Flag | `--confirm-live` | `--confirm` | `--confirm-live-sharelist` | `--confirm-live-content` |
+| Also requires | `LONGPORT_MODE=live` | — | `LONGPORT_MODE=live` | `LONGPORT_MODE=live` |
+| Implementation | `config.GuardWrite` | `config.GuardWatchlist` | `sharelistGate` (in `cmd/sharelist`) | `contentGate` (in `cmd/content`) |
+| Blocked exit code | `3` (`config.ExitBlocked`) | `3` (`config.ExitBlocked`) | **`3`** | **`3`** |
 
 **Why watchlist writes are not under the order gate.** The order gate's third
 condition, `LONGPORT_MODE=live`, exists because "live" means real money. A
@@ -255,9 +257,24 @@ you assert you have real money would be needlessly annoying. But these calls do
 mutate server-side state and are not idempotent, so they needed *a* real guard,
 not none. Hence a second gate with its own dry-run default.
 
+**Why sharelist and content writes have their own gates.** They are neither
+orders nor private scratch preferences, so neither existing gate fits:
+
+- A **sharelist** is a published, shareable list. It is visible to other users
+  and to your other devices, and `Delete` is irreversible — the SDK exposes no
+  undelete endpoint, and recreating a list does not restore its ID or contents.
+- **Content** publishes text *as the account owner*, publicly, and the SDK
+  exposes no delete-topic method. A post made here cannot be retracted.
+
+Both therefore require all three conditions, including `LONGPORT_MODE=live`:
+these are actions other people can see, so an explicit "this is real" assertion
+is appropriate in a way that it is not for a watchlist group. Their gates live
+**inside the command packages** rather than in `internal/config/guard.go`, so
+that adding them required no change to shared guard code.
+
 Either gate refusing makes **no network call at all**: the write commands print
-the exact request they would send, explain the refusal, and exit 0 without
-constructing a context. Verified for both:
+the exact request they would send, explain the refusal, and exit **3** without
+constructing a context. Verified for the order and watchlist gates:
 
 ```console
 $ go run ./cmd/watchlist -action create -name demo -symbols 700.HK
@@ -302,6 +319,53 @@ dummy token).
 Both switches are required and either alone still blocks. A bad
 `LONGPORT_WATCHLIST_DRY_RUN` value is rejected at startup rather than being
 silently treated as "on", and an unparseable value at runtime fails safe.
+
+### The sharelist and content gates in practice
+
+The sharelist and content refusals list **every** unsatisfied condition rather
+than the first, print the request body that would have been sent on
+`[DRY-RUN]`-prefixed lines, and exit **3**:
+
+```console
+$ go run ./cmd/sharelist -action delete -id 12345 -confirm-live-sharelist
+[config] sharelist_dry_run=true (separate gate: LONGPORT_SHARELIST_DRY_RUN + --confirm-live-sharelist + LONGPORT_MODE=live)
+
+[DRY-RUN] --- Delete (DELETE /v1/sharelists/{id}) request that would be sent ---
+[DRY-RUN]   id           12345
+[DRY-RUN]   WARNING        IRREVERSIBLE: there is no undelete endpoint. Deleting a sharelist removes it from your library and takes its constituents with it; recreating it will NOT restore the original contents or its ID.
+
+[DRY-RUN] BLOCKED: refusing to delete sharelist 12345.
+[DRY-RUN] Unsatisfied condition(s):
+[DRY-RUN]   - LONGPORT_SHARELIST_DRY_RUN is on (default 1; set it to 0 to allow sharelist writes)
+[DRY-RUN]   - LONGPORT_MODE=simulated (sharelist writes require LONGPORT_MODE=live)
+[DRY-RUN] NOTHING was sent to Longbridge. All three are required:
+[DRY-RUN]   LONGPORT_SHARELIST_DRY_RUN=0  +  --confirm-live-sharelist  +  LONGPORT_MODE=live
+$ echo $?
+3
+```
+
+With all three satisfied the gate opens and the request goes out (here rejected
+for the dummy token, which is the only observable proof available without a
+real token):
+
+```console
+$ LONGPORT_SHARELIST_DRY_RUN=0 LONGPORT_MODE=live \
+    go run ./cmd/sharelist -action create -name demo --confirm-live-sharelist
+error: creating sharelist "demo": longbridge openapi error, httpStatus:401 code:401004 message:token invalid trace:...
+```
+
+Exit code **3** is used specifically for a refusal, matching the convention in
+the sibling Tiger project. It is deliberately distinct from `0` (success), `1`
+(generic error) and `2` (missing credentials), so a script can distinguish "the
+safety gate did its job" from "the command failed". It is the same status the
+order and watchlist gates use, so all four gates agree.
+
+`-show-state` is the one opt-in exception to "a refused write makes no
+request": on a blocked `add`/`remove`/`sort` it fetches and prints the list's
+current constituents so the intended change is reviewable. It is **off by
+default** precisely so the no-network guarantee holds for a plain refused
+write, and a failure to fetch it is reported but never changes the gate's
+verdict.
 
 Note that `executions -action withdraw` is an **order** write (`WithdrawOrder`
 is an alias of `CancelOrder` in the SDK), so it uses the order gate and
@@ -643,39 +707,76 @@ error, because the entitlement arrives over the websocket at connect time. It
 therefore cannot fail the way the HTTP sections do, and may legitimately be
 empty on a very fast exit.
 
-### `sharelist` — user share lists (read-only)
+### `sharelist` — user share lists, with a gated editor
 
 Your own share lists, the full detail of one list including its constituents,
-and the platform's popular lists.
+the platform's popular lists — and, behind the [sharelist gate](#the-four-safety-gates),
+the five write methods on the lists you own.
 
 ```bash
 go run ./cmd/sharelist -action list
 go run ./cmd/sharelist -action popular -count 10
 go run ./cmd/sharelist -action detail -id 12345
 go run ./cmd/sharelist -action detail -id 12345 -stock-limit 50
+
+# writes — all three switches required
+LONGPORT_SHARELIST_DRY_RUN=0 LONGPORT_MODE=live \
+  go run ./cmd/sharelist -action create -name tech -description "semis" \
+    --confirm-live-sharelist
+LONGPORT_SHARELIST_DRY_RUN=0 LONGPORT_MODE=live \
+  go run ./cmd/sharelist -action add    -id 12345 -symbols 700.HK,9988.HK --confirm-live-sharelist
+LONGPORT_SHARELIST_DRY_RUN=0 LONGPORT_MODE=live \
+  go run ./cmd/sharelist -action sort   -id 12345 -symbols 9988.HK,700.HK  --confirm-live-sharelist
+LONGPORT_SHARELIST_DRY_RUN=0 LONGPORT_MODE=live \
+  go run ./cmd/sharelist -action remove -id 12345 -symbols 700.HK          --confirm-live-sharelist
+LONGPORT_SHARELIST_DRY_RUN=0 LONGPORT_MODE=live \
+  go run ./cmd/sharelist -action delete -id 12345 --confirm-live-sharelist
 ```
 
 | Flag | Default | Notes |
 | --- | --- | --- |
-| `-action` | `list` | `list`, `detail` or `popular`. |
+| `-action` | `list` | `list`, `detail`, `popular`, `create`, `delete`, `add`, `remove`, `sort`. |
 | `-count` | `20` | Sharelists returned by `list` and `popular`. |
-| `-id` | — | **Required** for `detail`. |
+| `-id` | — | **Required** for `detail`, `delete`, `add`, `remove` and `sort`. |
 | `-popular` | `false` | Alias for `-action popular`. |
 | `-stock-limit` | `20` | Constituent rows printed per list. |
+| `-name` | — | **Required** for `create`. |
+| `-description` | — | Optional for `create`; the SDK defaults it to the name. |
+| `-symbols` | — | **Required** for `add`, `remove`, `sort`. `CODE.MARKET` form, checked locally. |
+| `-confirm-live-sharelist` | `false` | **Required** for any write. |
+| `-show-state` | `false` | On a blocked `add`/`remove`/`sort`, also print the list's current contents (this makes a read-only request). |
 
-**What is not implemented, and why.** `SharelistContext` has eight methods.
-`List`, `Detail` and `Popular` are here. The other five — `Create`, `Delete`,
-`AddSecurities`, `RemoveSecurities` and `SortSecurities` — all mutate
-server-side state belonging to your account and are not idempotent, exactly like
-the watchlist writes. Implementing them would mean a third write gate, which is
-out of scope. The command prints this omission in its startup banner rather
-than leaving you to guess, and each of the three implemented actions asserts
-that the order gate is still closed before it does anything.
+**All eight `SharelistContext` methods are now covered.** The read/write split
+was verified against the v0.25.2 source rather than inferred from method names:
 
-### `content` — research and community content (read-only)
+| Method | Verb + path | Kind |
+| --- | --- | --- |
+| `List` | `GET /v1/sharelists` | read |
+| `Detail` | `GET /v1/sharelists/{id}` | read |
+| `Popular` | `GET /v1/sharelists/popular` | read |
+| `Create` | `POST /v1/sharelists` | **write** |
+| `Delete` | `DELETE /v1/sharelists/{id}` | **write** |
+| `AddSecurities` | `POST /v1/sharelists/{id}/items` | **write** |
+| `RemoveSecurities` | `DELETE /v1/sharelists/{id}/items` | **write** |
+| `SortSecurities` | `POST /v1/sharelists/{id}/items/sort` | **write** |
+
+Two things worth knowing before you use the writes. `Delete` is **irreversible**
+— the SDK has no undelete endpoint and recreating a list restores neither its
+ID nor its constituents, so the dry-run output says so explicitly. And
+`SortSecurities` **replaces** the list's order: a symbol you leave out of
+`-symbols` drops back out of its current position, so pass the full intended
+order rather than the rows you want to move. Both the add/remove/sort and
+delete paths warn about this in their dry-run block.
+
+Note that `-symbols` is validated locally for the `CODE.MARKET` shape, because
+the SDK silently converts `700.HK` to a `counter_id` of `ST/HK/700` and a bare
+`700` would be sent as-is and rejected by the API.
+
+### `content` — research and community content, with gated publishing
 
 Discussion topics and news for a symbol, one topic's full record, the replies
-on a topic, and your own topics.
+on a topic, your own topics — and, behind the [content gate](#the-four-safety-gates),
+publishing a topic or a reply.
 
 ```bash
 go run ./cmd/content -action topics -symbol 700.HK
@@ -683,24 +784,59 @@ go run ./cmd/content -action news -symbol AAPL.US
 go run ./cmd/content -action detail -topic-id 12345
 go run ./cmd/content -action replies -reply-topic 12345 -page 2
 go run ./cmd/content -action mine -topic-type article
+
+# writes — all three switches required
+LONGPORT_CONTENT_DRY_RUN=0 LONGPORT_MODE=live \
+  go run ./cmd/content -action create-topic -topic-type article \
+    -title "700.HK earnings" -body "Markdown body" -tickers 700.HK \
+    --confirm-live-content
+LONGPORT_CONTENT_DRY_RUN=0 LONGPORT_MODE=live \
+  go run ./cmd/content -action reply -reply-topic 12345 -body "Agreed." \
+    --confirm-live-content
 ```
 
 | Flag | Default | Notes |
 | --- | --- | --- |
-| `-action` | `topics` | `topics`, `news`, `detail`, `replies`, `mine`. |
+| `-action` | `topics` | `topics`, `news`, `detail`, `replies`, `mine`, `create-topic`, `reply`. |
 | `-symbol` | `700.HK` | For `topics` and `news`. |
 | `-topic-id` | — | **Required** for `detail`. |
-| `-reply-topic` | — | **Required** for `replies`. |
-| `-topic-type` | — | `article`, `post` or empty; filters `mine`. |
+| `-reply-topic` | — | **Required** for `replies` and `reply`. |
+| `-topic-type` | — | `article`, `post` or empty; filters `mine`, and is the type for `create-topic`. |
 | `-page` | `1` | 1-based, for `replies` and `mine`. |
 | `-size` | `20` | `replies` allows 1–50, `mine` allows 1–500. |
 | `-limit` | `20` | Rows printed (`0` = all). |
+| `-title` | — | Required when `create-topic -topic-type article`. |
+| `-body` | — | **Required** for `create-topic` and `reply`. |
+| `-tickers` | — | Comma-separated, max 10, for `create-topic`. |
+| `-hashtags` | — | Comma-separated, max 5, for `create-topic`. |
+| `-reply-to-id` | — | For `reply`: nest under this reply id; empty = top-level. |
+| `-confirm-live-content` | `false` | **Required** for any write. |
 
-**What is not implemented, and why.** `ContentContext` has seven methods. The
-five reads are here. `CreateTopic` and `CreateTopicReply` publish content under
-your account — they are writes, and both are named in the startup banner. The
-`-size` bounds are the SDK's own documented ranges and are checked locally, so
-an out-of-range value fails immediately instead of at the API.
+**All seven `ContentContext` methods are now covered.** Again from the source,
+not the method names:
+
+| Method | Verb + path | Kind |
+| --- | --- | --- |
+| `Topics` | `GET /v1/content/topics` | read |
+| `News` | `GET /v1/content/news` | read |
+| `TopicDetail` | `GET /v1/content/topics/{id}` | read |
+| `MyTopics` | `GET /v1/content/topics/my` | read |
+| `ListTopicReplies` | `GET /v1/content/topics/{id}/comments` | read |
+| `CreateTopic` | `POST /v1/content/topics` | **write** |
+| `CreateTopicReply` | `POST /v1/content/topics/{id}/comments` | **write** |
+
+Both writes publish under your account and are **public and irreversible** —
+the SDK exposes no delete-topic method, so anything published here cannot be
+retracted from this demo. That is why they also require `LONGPORT_MODE=live`
+on top of the dry-run switch and the confirmation flag. The dry-run block
+repeats this warning, and the reply path mentions the SDK's per-topic rate
+limit (first 3 replies free, then 3s → 5s → 8s → 13s → 21s → 34s → 55s cap).
+
+The SDK omits `title`, `topic_type`, `tickers`, `hashtags` and `reply_to_id`
+from the body when they are empty, so the dry-run block lists only the fields
+that would actually be sent rather than printing misleading blanks. The `-size`
+bounds are the SDK's own documented ranges and are checked locally, so an
+out-of-range value fails immediately instead of at the API.
 
 ### `portfolio` — P&L analytics (read-only)
 
@@ -887,7 +1023,29 @@ file` otherwise.
 | --- | --- | --- |
 | `LONGPORT_DRY_RUN` | `1` | Blocks all order writes. Must be `0` to write. |
 | `LONGPORT_MODE` | `simulated` | `simulated` or `live`. |
-| `LONGPORT_WATCHLIST_DRY_RUN` | `1` | Blocks watchlist writes. Must be `0` to write. See [the two gates](#the-two-safety-gates). |
+| `LONGPORT_WATCHLIST_DRY_RUN` | `1` | Blocks watchlist writes. Must be `0` to write. See [the four gates](#the-four-safety-gates). |
+| `LONGPORT_SHARELIST_DRY_RUN` | `1` | Blocks sharelist writes. Must be `0` **and** `--confirm-live-sharelist` **and** `LONGPORT_MODE=live`. |
+| `LONGPORT_CONTENT_DRY_RUN` | `1` | Blocks publishing topics/replies. Must be `0` **and** `--confirm-live-content` **and** `LONGPORT_MODE=live`. |
+
+### Exit codes
+
+| Code | Meaning |
+| --- | --- |
+| `0` | Success. The command did what it was asked. |
+| `1` | A real failure: the API rejected the call, or a flag value was unusable. |
+| `2` | Missing credentials, or a usage error. |
+| `3` | **BLOCKED.** A safety guard refused a write. Nothing was sent. |
+
+Exit `3` is reserved, and is the one to check when scripting. It is defined
+once as `config.ExitBlocked` and reached by every guard refusal, which returns
+a `*config.BlockedError`; `cli.Fail` maps that to `os.Exit(3)`. A guard
+refusal used to return `nil` and therefore exit `0`, which made a refusal
+indistinguishable from a completed order — do not reintroduce that.
+
+Every guarded command uses it: `trade` (submit/replace/cancel),
+`executions -action withdraw`, `watchlist` (create/update/pin/delete), `dca`
+(create/update/pause/resume/stop/set-reminder), `alert` (add/update/delete) and
+`sharelist` / `content` where present.
 
 ### Secret handling
 
@@ -944,21 +1102,21 @@ Not covered, and why:
 | Area | Context type | Methods | Covered | Why not |
 | --- | --- | --- | --- | --- |
 | Fundamentals | `FundamentalContext` | 32 | 32 | Fully covered by `cmd/fundamentals`. |
-| Share lists | `SharelistContext` | 8 | 3 | The 5 uncovered are **writes** (`Create`, `Delete`, `AddSecurities`, `RemoveSecurities`, `SortSecurities`) and would need a third gate. |
-| Research content | `ContentContext` | 7 | 5 | The 2 uncovered are `CreateTopic` and `CreateTopicReply`, both writes. |
+| Share lists | `SharelistContext` | 8 | 8 | Fully covered by `cmd/sharelist`; the 5 writes sit behind the sharelist gate. |
+| Research content | `ContentContext` | 7 | 7 | Fully covered by `cmd/content`; the 2 writes sit behind the content gate. |
 | Screeners | `ScreenerContext` | 5 | 0 | Symbol screening. |
 | Portfolios | `PortfolioContext` | 5 | 5 | Fully covered. |
 | Price alerts | `AlertContext` | 4 | 0 | **All writes.** Would need its own third guard. |
 | Assets | `AssetContext` | 2 | 2 | Fully covered by `cmd/fundamentals`. |
 | Calendar | `CalendarContext` | 1 | 1 | Fully covered by `cmd/fundamentals`. `cmd/market` also has `TradingDays` from `QuoteContext`. |
 
-The rule the omissions follow is simple: **this demo only calls methods that
-cannot mutate server state, and every method that does mutate is left alone
-rather than shipped behind a half-guard.** `AlertContext` is the clearest case —
-all four of its methods create or cancel a price alert. `SharelistContext` and
-`ContentContext` are mixed: their reads are covered and their writes are not.
-`cmd/sharelist` and `cmd/content` print exactly which methods they skipped, so
-the gap is discoverable at runtime and not just here.
+The rule the omissions follow is simple: **this demo only calls a mutating
+method when that method sits behind its own complete gate.** `AlertContext` is
+currently the clearest case of something left alone — all four of its methods
+create or cancel a price alert, and no alert gate exists. `SharelistContext`
+and `ContentContext` used to be in that position and are no longer: their
+writes are now covered, each behind its own three-condition gate, so those
+contexts are fully covered.
 
 ---
 
@@ -981,10 +1139,12 @@ What *was* verified by execution:
   config, signing and network path are genuinely wired, not stubbed. This was
   checked for all three `warrant` actions, `watchlist -action list`, all seven
   read-only `executions` actions, all eleven `reference` sections, all fourteen
-  `market` sections, all three `sharelist` actions, all five `content` actions,
-  all five `portfolio` actions and all **thirty-three** `fundamentals` actions.
+  `market` sections, all three read-only `sharelist` actions, all five
+  read-only `content` actions, all five `portfolio` actions and all
+  **thirty-three** `fundamentals` actions.
 - Every write path is blocked in each of the non-sending configurations, and
-  every refusal was confirmed to make **no** network call.
+  every refusal was confirmed to make **no** network call. The 26 sharelist
+  and content write combinations all exit **3**.
 - The static coverage check above finds no uncovered method.
 
 **A 401 is a real answer, not a successful one.** It proves the request was
@@ -1005,6 +1165,26 @@ Specifically verified about the guards:
 | `watchlist -action create` | default | blocked: missing `--confirm`, no network |
 | `watchlist -action create` | `--confirm` | blocked: watchlist dry run, no network |
 | `watchlist` create/update/pin/delete | `WATCHLIST_DRY_RUN=0 --confirm` | reached the API (401 on the dummy token) |
+| `sharelist` create/delete/add/remove/sort | default | **exit 3**, blocked, no network |
+| `sharelist` create/delete/add/remove/sort | `--confirm-live-sharelist` only | **exit 3**, blocked (dry run still on), no network |
+| `sharelist` create/delete/add/remove/sort | `SHARELIST_DRY_RUN=0` only, no flag | **exit 3**, blocked (no flag), no network |
+| `sharelist` create/delete/add/remove/sort | `SHARELIST_DRY_RUN=0 --confirm-live-sharelist` | **exit 3**, blocked (mode=simulated), no network |
+| `sharelist` create | `SHARELIST_DRY_RUN=0 --confirm-live-sharelist MODE=live` | reached the API (401 on the dummy token) |
+| `content` create-topic/reply | default | **exit 3**, blocked, no network |
+| `content` create-topic/reply | `--confirm-live-content` only | **exit 3**, blocked (dry run still on), no network |
+| `content` create-topic/reply | `CONTENT_DRY_RUN=0` only, no flag | **exit 3**, blocked (no flag), no network |
+| `content` create-topic/reply | `CONTENT_DRY_RUN=0 --confirm-live-content` | **exit 3**, blocked (mode=simulated), no network |
+| `content` create-topic | `CONTENT_DRY_RUN=0 --confirm-live-content MODE=live` | reached the API (401 on the dummy token) |
+
+All 18 sharelist rows (5 actions × 4 non-sending switch combinations) and all
+8 content rows (2 actions × 4) were checked and every one exited **3** with the
+intended request printed and nothing sent. The no-network claim was confirmed
+empirically rather than by inspection: with `LONGBRIDGE_HTTP_URL` pointed at
+`http://127.0.0.1:1`, a blocked sharelist delete and a blocked content reply
+both returned exit 3 in under 10 ms, while a *read* through the same dead
+gateway failed with `dial tcp 127.0.0.1:1: connect: connection refused` — so
+the override was demonstrably in effect and the refusals demonstrably never
+touched it.
 
 What is **not** verified: the shape of successful responses, field-by-field
 rendering, column widths, and whether any live order is accepted. No command
@@ -1033,13 +1213,14 @@ shape is not stable — so for those, the output is a pretty-printer, not a
 mapping, and the true field set is unknown until someone runs it with a real
 token. Expect to adjust this command more than any other in the repo.
 
-One pre-existing wrinkle worth flagging, found while re-checking the guards: a
-**blocked** write in `cmd/trade` and `cmd/executions` exits **0**, because the
-gate prints its refusal to stderr and then returns `nil` rather than an error.
-The refusal is loud and correct, and it genuinely makes no network call, but
-the exit code does not distinguish "blocked" from "succeeded". If you script
-around this repo, check the output text, not just `$?`. This was left as-is
-because those files are outside the scope of the fundamentals work.
+A wrinkle that used to exist and is now **fixed**: a **blocked** write in
+`cmd/trade` and `cmd/executions` used to exit **0**, because the gate printed
+its refusal to stderr and then returned `nil` rather than an error. The refusal
+was loud and correct and genuinely made no network call, but the exit code did
+not distinguish "blocked" from "succeeded", so any script wrapping this repo
+would have treated a refusal as a completed order. Guard refusals now return a
+`*config.BlockedError` and `cli.Fail` maps it to **exit 3** in every guarded
+command. See "Exit codes" under Configuration reference.
 
 There is no automated test suite. There should be — the config loader and both
 guards in particular are testable without credentials and are the natural
@@ -1097,8 +1278,8 @@ longbridge-go-demo/
 │   ├── watchlist/main.go   saved groups + separately gated edits
 │   ├── executions/main.go  fills, order detail, buying power, cash flow
 │   ├── reference/main.go   static, market-wide and entitlement data
-│   ├── sharelist/main.go   share lists: list, detail, popular (reads only)
-│   ├── content/main.go     topics, news, topic detail, replies, my topics
+│   ├── sharelist/main.go   share lists: list, detail, popular + gated create/delete/add/remove/sort
+│   ├── content/main.go     topics, news, detail, replies, mine + gated create-topic/reply
 │   ├── portfolio/main.go   exchange rates and P&L analytics
 │   └── fundamentals/       the 32 fundamental methods, + asset & calendar
 │       ├── main.go         flags, validation, action dispatch
