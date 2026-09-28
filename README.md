@@ -4,7 +4,7 @@ A small, complete, safety-gated demo of the **Longbridge (Longport) OpenAPI**
 using the official Go SDK, [`github.com/longbridge/openapi-go`](https://pkg.go.dev/github.com/longbridge/openapi-go)
 at **v0.25.2**.
 
-Eight commands, one shared config loader, and a hard rule that no order can be
+Eleven commands, one shared config loader, and a hard rule that no order can be
 sent unless you say so three different ways.
 
 **SDK coverage: every exported method on `QuoteContext` and `TradeContext` is
@@ -13,12 +13,13 @@ exercised somewhere in `cmd/`.** That is 66 method definitions (47 on
 the gap is `Close`, `Subscribe`, `Unsubscribe` and `Trades` appearing on both
 types. See [Coverage](#sdk-coverage) for the command that verifies this.
 
-The SDK has 130 context methods in total across ten context types. The other
-64 belong to `FundamentalContext` (32), `SharelistContext` (8), `ContentContext`
-(7), `ScreenerContext` (5), `PortfolioContext` (5), `AlertContext` (4),
-`AssetContext` (2) and `CalendarContext` (1), none of which this demo uses —
-they cover fundamental data, share lists, research content, screeners,
-portfolios, price alerts and the trading calendar.
+The SDK has 130 context methods in total across ten context types. Of the
+other 64, this demo now also covers `SharelistContext` (3 of 8 read methods),
+`ContentContext` (5 of 7 read methods) and `PortfolioContext` (all 5). Still
+unused: `FundamentalContext` (32), `ScreenerContext` (5), `AlertContext` (4),
+`AssetContext` (2) and `CalendarContext` (1) — fundamentals, screeners, price
+alerts, fund reference and the trading calendar. See
+[Coverage](#sdk-coverage) for the exact list and the reason for each omission.
 
 > **Status: not yet tested against the live API.** See
 > [Honest status](#honest-status). Everything below was verified by building,
@@ -72,6 +73,9 @@ go run ./cmd/warrant                      # HK derivative warrants
 go run ./cmd/watchlist -action list        # saved watchlist groups
 go run ./cmd/executions -action today-executions
 go run ./cmd/reference                     # static + market-wide reference data
+go run ./cmd/sharelist                     # your share lists, popular lists
+go run ./cmd/content -action news          # research news for a symbol
+go run ./cmd/portfolio -action summary     # account-level P&L analytics
 ```
 
 Every binary prints usage with `-h` and needs **no** credentials for that:
@@ -397,24 +401,95 @@ read-only: subscribing to a push feed changes nothing server-side. It reports
 per-topic subscribe failures explicitly, because a partial subscribe still
 "successfully" returns and silently streaming nothing is the confusing outcome.
 
-### `market` — reference data (read-only)
+### `market` — market-wide data (read-only)
 
-Market-wide trading status, trading calendar, intraday timeline.
+Trading status, the trading calendar, an intraday timeline, and the rest of
+the SDK's `market` package: A/H premium, market anomaly alerts, broker
+holdings, index constituents, top movers, ranked lists and trade statistics.
+
+Everything is selected by `-sections`, so you can pull just one part.
 
 ```bash
-go run ./cmd/market
+go run ./cmd/market                                            # default sections
 go run ./cmd/market -sections status
 go run ./cmd/market -sections calendar -market HK -back 7 -forward 7
 go run ./cmd/market -sections timeline -timeline-symbol 700.HK -lines 30
+go run ./cmd/market -sections ahpremium -ah-symbol 00700.HK -ah-period day -ah-count 30
+go run ./cmd/market -sections ahpremium-intraday
+go run ./cmd/market -sections anomaly -anomaly-market HK
+go run ./cmd/market -sections broker-holding -broker-symbol 700.HK -broker-period 5
+go run ./cmd/market -sections broker-holding-detail -broker-symbol 700.HK
+go run ./cmd/market -sections broker-holding-daily -broker-symbol 700.HK -broker-id 1234
+go run ./cmd/market -sections constituent -index HSI.HK
+go run ./cmd/market -sections top-movers -mover-markets HK,US -mover-sort desc -mover-limit 10
+go run ./cmd/market -sections rank-categories
+go run ./cmd/market -sections rank-list -rank-key turnover
+go run ./cmd/market -sections trade-stats -trade-stats-symbol 700.HK
 ```
+
+| Section | SDK method | Notes |
+| --- | --- | --- |
+| `status` | `MarketStatus` | Per-market status, delayed status, sub-status. |
+| `calendar` | `TradingDays` (quote ctx) | Full and half trading days. |
+| `timeline` | `Intraday` (quote ctx) | Last `-lines` intraday points. |
+| `ahpremium` | `AhPremium` | A/H premium klines for a dual-listed name. |
+| `ahpremium-intraday` | `AhPremiumIntraday` | Today's A/H premium klines. |
+| `anomaly` | `Anomaly` | Unusual price/volume events for a market. |
+| `broker-holding` | `BrokerHolding` | Top buy/sell brokers over a window. |
+| `broker-holding-detail` | `BrokerHoldingDetail` | All brokers, ratio and share changes. |
+| `broker-holding-daily` | `BrokerHoldingDaily` | Daily history for one broker. |
+| `constituent` | `Constituent` | Index members with rise/flat/fall counts. |
+| `top-movers` | `TopMovers` | Unusual movers across one or more markets. |
+| `rank-categories` | `RankCategories` | Category keys for the rank list. |
+| `rank-list` | `RankList` | The ranked list for one category key. |
+| `trade-stats` | `TradeStats` | Average price, totals, price levels. |
 
 | Flag | Default | Notes |
 | --- | --- | --- |
-| `-sections` | `status,calendar,timeline` | Any subset, comma-separated. |
-| `-market` | `HK` | `HK US CN SG UK`. |
+| `-sections` | `status,calendar,timeline` | Comma-separated subset of the table above. |
+| `-market` | `HK` | `HK US CN SG UK`; for the calendar. |
 | `-back` / `-forward` | `7` | Calendar window in days. |
 | `-timeline-symbol` | `700.HK` | Intraday symbol. |
 | `-lines` | `20` | Intraday lines to print. |
+| `-ah-symbol` | `00700.HK` | Dual-listed symbol for both A/H sections. |
+| `-ah-period` | `day` | `1m 5m 15m 30m 60m day week month year`. |
+| `-ah-count` | `30` | A/H klines to print. |
+| `-anomaly-market` | `HK` | Market for `anomaly`. |
+| `-broker-symbol` | `700.HK` | Symbol for the three broker sections. |
+| `-broker-id` | — | **Required** for `broker-holding-daily`. |
+| `-broker-period` | `5` | Broker window: `1 5 20 60`. |
+| `-index` | `HSI.HK` | Index symbol for `constituent`. |
+| `-mover-markets` | `HK` | Comma-separated markets for `top-movers`. |
+| `-mover-sort` | `desc` | `asc` or `desc`. |
+| `-mover-date` | — | Optional `YYYY-MM-DD` filter, validated locally. |
+| `-mover-limit` | `10` | Max events. |
+| `-rank-key` | — | **Required** for `rank-list`; get it from `rank-categories`. |
+| `-rank-article` | `false` | Ask for article content too. |
+| `-trade-stats-symbol` | `700.HK` | Symbol for `trade-stats`. |
+| `-timeout` | `15s` | Per-request timeout. |
+
+Two sections need an input the API cannot guess, and the command fails at
+startup with a clear message rather than making a doomed request:
+`-broker-id` for `broker-holding-daily` and `-rank-key` for `rank-list`.
+
+`calendar` and `timeline` live on the quote context, everything else on the
+market context. The quote context opens a websocket, so `cmd/market` creates it
+**lazily** — a market-only run such as `-sections anomaly` never opens it. That
+also means each section is independently reachable; with the dummy credentials
+you get a distinct, correct 401 per section rather than one blanket failure.
+
+The broker periods and the A/H periods are bare `int` enums in the SDK, so they
+are parsed by explicit switch: an unrecognised value is an error rather than a
+silent zero. `TopMovers`' sort is a raw `uint32` for the same reason.
+
+`rank-categories` returns an opaque `json.RawMessage` in the SDK, not a typed
+struct, so the command pretty-prints the JSON instead of mapping fields it does
+not have. `rank-list` re-adds the SDK's internal `ib_` key prefix for you if
+you paste a clean key.
+
+`AhPremiumKline` holds plain `decimal.Decimal` values rather than pointers, so
+there is no absent-versus-zero distinction to preserve there; the broker-holding
+and constituent fields *are* pointers and render `-` when absent.
 
 ### `warrant` — HK derivative warrants (read-only)
 
@@ -566,6 +641,102 @@ error, because the entitlement arrives over the websocket at connect time. It
 therefore cannot fail the way the HTTP sections do, and may legitimately be
 empty on a very fast exit.
 
+### `sharelist` — user share lists (read-only)
+
+Your own share lists, the full detail of one list including its constituents,
+and the platform's popular lists.
+
+```bash
+go run ./cmd/sharelist -action list
+go run ./cmd/sharelist -action popular -count 10
+go run ./cmd/sharelist -action detail -id 12345
+go run ./cmd/sharelist -action detail -id 12345 -stock-limit 50
+```
+
+| Flag | Default | Notes |
+| --- | --- | --- |
+| `-action` | `list` | `list`, `detail` or `popular`. |
+| `-count` | `20` | Sharelists returned by `list` and `popular`. |
+| `-id` | — | **Required** for `detail`. |
+| `-popular` | `false` | Alias for `-action popular`. |
+| `-stock-limit` | `20` | Constituent rows printed per list. |
+
+**What is not implemented, and why.** `SharelistContext` has eight methods.
+`List`, `Detail` and `Popular` are here. The other five — `Create`, `Delete`,
+`AddSecurities`, `RemoveSecurities` and `SortSecurities` — all mutate
+server-side state belonging to your account and are not idempotent, exactly like
+the watchlist writes. Implementing them would mean a third write gate, which is
+out of scope. The command prints this omission in its startup banner rather
+than leaving you to guess, and each of the three implemented actions asserts
+that the order gate is still closed before it does anything.
+
+### `content` — research and community content (read-only)
+
+Discussion topics and news for a symbol, one topic's full record, the replies
+on a topic, and your own topics.
+
+```bash
+go run ./cmd/content -action topics -symbol 700.HK
+go run ./cmd/content -action news -symbol AAPL.US
+go run ./cmd/content -action detail -topic-id 12345
+go run ./cmd/content -action replies -reply-topic 12345 -page 2
+go run ./cmd/content -action mine -topic-type article
+```
+
+| Flag | Default | Notes |
+| --- | --- | --- |
+| `-action` | `topics` | `topics`, `news`, `detail`, `replies`, `mine`. |
+| `-symbol` | `700.HK` | For `topics` and `news`. |
+| `-topic-id` | — | **Required** for `detail`. |
+| `-reply-topic` | — | **Required** for `replies`. |
+| `-topic-type` | — | `article`, `post` or empty; filters `mine`. |
+| `-page` | `1` | 1-based, for `replies` and `mine`. |
+| `-size` | `20` | `replies` allows 1–50, `mine` allows 1–500. |
+| `-limit` | `20` | Rows printed (`0` = all). |
+
+**What is not implemented, and why.** `ContentContext` has seven methods. The
+five reads are here. `CreateTopic` and `CreateTopicReply` publish content under
+your account — they are writes, and both are named in the startup banner. The
+`-size` bounds are the SDK's own documented ranges and are checked locally, so
+an out-of-range value fails immediately instead of at the API.
+
+### `portfolio` — P&L analytics (read-only)
+
+Currency exchange rates, the account-level profit/loss summary, a per-security
+breakdown, a by-market page, per-security detail and the flow records behind it.
+All five `PortfolioContext` methods are covered.
+
+```bash
+go run ./cmd/portfolio -action rates
+go run ./cmd/portfolio -action summary
+go run ./cmd/portfolio -action summary -start 2026-01-01 -end 2026-06-30
+go run ./cmd/portfolio -action by-market -market HK -page 1
+go run ./cmd/portfolio -action detail -symbol 700.HK
+go run ./cmd/portfolio -action flows -symbol 700.HK -derivative
+```
+
+| Flag | Default | Notes |
+| --- | --- | --- |
+| `-action` | `summary` | `rates`, `summary`, `by-market`, `detail`, `flows`. |
+| `-symbol` | `700.HK` | **Required** for `detail` and `flows`. |
+| `-start` / `-end` | — | `YYYY-MM-DD`; empty uses the server default window. |
+| `-market` | — | Market filter for `by-market`. |
+| `-currency` | — | Currency filter for `by-market`. |
+| `-page` | `1` | 1-based, for `by-market` and `flows`. |
+| `-size` | `50` | Page size for `by-market` and `flows`. |
+| `-derivative` | `false` | Include derivative flows. |
+| `-limit` | `20` | Detail rows printed (`0` = all). |
+
+Every money field here is a `*decimal.Decimal`, so `nil` means "the API did not
+supply this", which is a different fact from zero. The output renders `-` for
+absent and a real number for zero, because a P&L report that silently shows
+`0.00` for a missing figure is worse than one that admits it is missing.
+
+`ProfitAnalysis` internally calls two endpoints and merges them; `summary`
+prints both the summary half and the per-security sublist. `flows` and `detail`
+return `has_more` / credit-debit-fee breakdowns, which are printed in full up
+to `-limit`.
+
 ---
 
 ## Configuration reference
@@ -652,43 +823,57 @@ been observed. See [Honest status](#honest-status).
 
 Not covered, and why:
 
-| Area | Context type | Methods | Why not |
-| --- | --- | --- | --- |
-| Fundamentals | `FundamentalContext` | 32 | Financial statements and valuation; needs a paid data entitlement to be useful. |
-| Share lists | `SharelistContext` | 8 | User share lists; write-shaped, same category as the watchlist. |
-| Research content | `ContentContext` | 7 | News and research documents. |
-| Screeners | `ScreenerContext` | 5 | Symbol screening. |
-| Portfolios | `PortfolioContext` | 5 | Multi-account portfolio aggregation. |
-| Price alerts | `AlertContext` | 4 | **All writes.** Would need its own third guard. |
-| Assets | `AssetContext` | 2 | Fund/NAV reference. |
-| Calendar | `CalendarContext` | 1 | `cmd/market` uses `TradingDays` from `QuoteContext` instead. |
+| Area | Context type | Methods | Covered | Why not |
+| --- | --- | --- | --- | --- |
+| Fundamentals | `FundamentalContext` | 32 | 0 | Financial statements and valuation; needs a paid data entitlement to be useful. |
+| Share lists | `SharelistContext` | 8 | 3 | The 5 uncovered are **writes** (`Create`, `Delete`, `AddSecurities`, `RemoveSecurities`, `SortSecurities`) and would need a third gate. |
+| Research content | `ContentContext` | 7 | 5 | The 2 uncovered are `CreateTopic` and `CreateTopicReply`, both writes. |
+| Screeners | `ScreenerContext` | 5 | 0 | Symbol screening. |
+| Portfolios | `PortfolioContext` | 5 | 5 | Fully covered. |
+| Price alerts | `AlertContext` | 4 | 0 | **All writes.** Would need its own third guard. |
+| Assets | `AssetContext` | 2 | 0 | Fund/NAV reference. |
+| Calendar | `CalendarContext` | 1 | 0 | `cmd/market` uses `TradingDays` from `QuoteContext` instead. |
 
-`AlertContext` is the interesting omission: every one of its four methods
-creates or cancels a price alert, so covering it would mean adding a third
-write gate. That is out of scope here rather than something that was forgotten.
+The rule the omissions follow is simple: **this demo only calls methods that
+cannot mutate server state, and every method that does mutate is left alone
+rather than shipped behind a half-guard.** `AlertContext` is the clearest case —
+all four of its methods create or cancel a price alert. `SharelistContext` and
+`ContentContext` are mixed: their reads are covered and their writes are not.
+`cmd/sharelist` and `cmd/content` print exactly which methods they skipped, so
+the gap is discoverable at runtime and not just here.
 
 ---
 
 ## Honest status
 
 **This project has never been run against a working Longbridge account.** It
-was not built with an access token available, and no order has been placed.
+was not built with an access token available, and no order has been placed. The
+account the user has is a *simulated* one, but no access token for it was
+supplied, so nothing in this repo has ever been validated against a live API.
 
 What *was* verified by execution:
 
 - `gofmt -l .` reports nothing.
 - `go build ./...` and `go vet ./...` both exit 0.
-- All eight binaries build; `-h` exits 0 with no credentials.
-- All eight exit **2** with a readable missing-credentials message listing all
+- All eleven binaries build; `-h` exits 0 with no credentials.
+- All eleven exit **2** with a readable missing-credentials message listing all
   three variables, and no panic.
 - With dummy credentials, every command reaches the real Longbridge API and
   fails with `httpStatus:401 code:401004 message:token invalid` — proving the
   config, signing and network path are genuinely wired, not stubbed. This was
   checked for all three `warrant` actions, `watchlist -action list`, all seven
-  read-only `executions` actions, and all eleven `reference` sections.
+  read-only `executions` actions, all eleven `reference` sections, all fourteen
+  `market` sections, all three `sharelist` actions, all five `content` actions
+  and all five `portfolio` actions.
 - Every write path is blocked in each of the non-sending configurations, and
   every refusal was confirmed to make **no** network call.
 - The static coverage check above finds no uncovered method.
+
+**A 401 is a real answer, not a successful one.** It proves the request was
+built, signed and delivered, and rejected. It says nothing about the shape of a
+successful response, whether a column is wide enough for a real security name,
+or whether a field is really optional. Nothing below should be read as
+"this output was observed from Longbridge".
 
 Specifically verified about the guards:
 
@@ -710,10 +895,12 @@ written against the v0.25.2 type definitions in the module cache, so it should
 be correct, but "should be" is not "was observed". Expect to adjust column
 widths once real data flows.
 
-This matters most for the newer sections, whose types are the least
-documented: the short-sale fields, the capital-flow points, the trading-session
-minute encoding and the option-volume strings are all rendered from the struct
-definitions alone.
+This matters most for the newest sections, whose types are the least
+documented: the A/H premium klines, the broker-holding change quadruples, the
+rank-category JSON and the portfolio P&L credit/debit/fee lines are all
+rendered from the struct definitions alone. `RankCategories` in particular
+returns an opaque `json.RawMessage`, so its rendering is a pretty-printer and
+not a field mapping at all.
 
 There is no automated test suite. There should be — the config loader and both
 guards in particular are testable without credentials and are the natural
@@ -766,11 +953,14 @@ longbridge-go-demo/
 │   ├── quote/main.go       read-only market data snapshot
 │   ├── trade/main.go       account state + gated order writes
 │   ├── watch/main.go       realtime stream, graceful SIGINT
-│   ├── market/main.go      status, calendar, intraday timeline
+│   ├── market/main.go      status, calendar, timeline, + the market package
 │   ├── warrant/main.go     HK warrant list, quotes, issuers
 │   ├── watchlist/main.go   saved groups + separately gated edits
 │   ├── executions/main.go  fills, order detail, buying power, cash flow
-│   └── reference/main.go   static, market-wide and entitlement data
+│   ├── reference/main.go   static, market-wide and entitlement data
+│   ├── sharelist/main.go   share lists: list, detail, popular (reads only)
+│   ├── content/main.go     topics, news, topic detail, replies, my topics
+│   └── portfolio/main.go   exchange rates and P&L analytics
 ├── internal/
 │   ├── config/             env + YAML loader, mode/dry-run switch, redaction
 │   │   ├── config.go       credentials, LONGPORT_MODE, order gate
