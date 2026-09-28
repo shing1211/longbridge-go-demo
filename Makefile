@@ -1,6 +1,6 @@
 BIN        := bin
 GO         ?= go
-BINARIES   := quote trade watch market warrant watchlist executions reference fundamentals sharelist content portfolio
+BINARIES   := quote trade watch market warrant watchlist executions reference fundamentals sharelist content portfolio dca alert
 CMDS       := $(addprefix ./cmd/,$(BINARIES))
 
 .PHONY: all
@@ -76,6 +76,14 @@ run-content: ## go run ./cmd/content
 .PHONY: run-portfolio
 run-portfolio: ## go run ./cmd/portfolio
 	$(GO) run ./cmd/portfolio
+
+.PHONY: run-dca
+run-dca: ## go run ./cmd/dca
+	$(GO) run ./cmd/dca
+
+.PHONY: run-alert
+run-alert: ## go run ./cmd/alert
+	$(GO) run ./cmd/alert
 
 .PHONY: clean
 clean: ## Remove build output

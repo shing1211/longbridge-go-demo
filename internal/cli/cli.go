@@ -94,6 +94,11 @@ func NewUsage(name, summary string) *Usage {
 		fmt.Fprintf(out, "  LONGPORT_MODE                simulated (default) or live.\n")
 		fmt.Fprintf(out, "  LONGPORT_WATCHLIST_DRY_RUN   1/true (default) blocks watchlist writes\n")
 		fmt.Fprintf(out, "                              (a separate gate; see cmd/watchlist).\n")
+		fmt.Fprintf(out, "  LONGPORT_DCA_DRY_RUN          1/true (default) blocks DCA plan writes.\n")
+		fmt.Fprintf(out, "                              Needs LONGPORT_MODE=live too; see cmd/dca.\n")
+		fmt.Fprintf(out, "  LONGPORT_ALERT_DRY_RUN        1/true (default) blocks price-alert writes.\n")
+		fmt.Fprintf(out, "                              Needs LONGPORT_MODE=live too; see cmd/alert.\n")
+		fmt.Fprintf(out, "\nExit codes: 0 ok, 1 error, 2 missing credentials, 3 BLOCKED by a guard.\n")
 		fmt.Fprintf(out, "\nSee README.md for the simulated-account walkthrough.\n")
 	}
 

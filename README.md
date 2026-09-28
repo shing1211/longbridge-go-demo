@@ -36,6 +36,7 @@ are now fully covered by `cmd/fundamentals`. See
 - [Dry-run semantics and the safety gate](#dry-run-semantics-and-the-safety-gate)
 - [The four safety gates](#the-four-safety-gates)
 - [Commands](#commands)
+- [The reusable write guard](#the-reusable-write-guard)
 - [Configuration reference](#configuration-reference)
 - [SDK coverage](#sdk-coverage)
 - [Honest status](#honest-status)
@@ -75,6 +76,8 @@ go run ./cmd/executions -action today-executions
 go run ./cmd/reference                     # static + market-wide reference data
 go run ./cmd/sharelist                     # your share lists, popular lists
 go run ./cmd/content -action news          # research news for a symbol
+go run ./cmd/dca                            # your DCA plans + statistics
+go run ./cmd/alert -action list             # your price alerts
 go run ./cmd/portfolio -action summary     # account-level P&L analytics
 go run ./cmd/fundamentals -action company   # company fundamentals, ratings, valuation
 go run ./cmd/fundamentals -action calendar  # financial calendar
@@ -248,6 +251,24 @@ opens another.
 | Also requires | `LONGPORT_MODE=live` | — | `LONGPORT_MODE=live` | `LONGPORT_MODE=live` |
 | Implementation | `config.GuardWrite` | `config.GuardWatchlist` | `sharelistGate` (in `cmd/sharelist`) | `contentGate` (in `cmd/content`) |
 | Blocked exit code | `3` (`config.ExitBlocked`) | `3` (`config.ExitBlocked`) | **`3`** | **`3`** |
+
+Two further gates — for DCA plans and price alerts — were added alongside
+these. They use the shared, reusable `config.WriteGuard` helper rather than a
+per-command copy of the loop:
+
+| | DCA gate | Price-alert gate |
+| --- | --- | --- |
+| Guards | `Create`, `Update`, `Pause`, `Resume`, `Stop`, `SetReminder` | `Add`, `Update`, `Delete` |
+| Env switch | `LONGPORT_DCA_DRY_RUN` (default `1`) | `LONGPORT_ALERT_DRY_RUN` (default `1`) |
+| Flag | `--confirm-live-dca` | `--confirm-live-alert` |
+| Also requires | `LONGPORT_MODE=live` | `LONGPORT_MODE=live` |
+| Implementation | `config.DCAGuard` (a `config.WriteGuard`) | `config.AlertGuard` (a `config.WriteGuard`) |
+| Blocked exit code | `3` | `3` |
+
+All six gates refuse independently and all six exit **3**. See
+[`dca`](#dca--dollar-cost-averaging-plans-with-a-dedicated-write-gate),
+[`alert`](#alert--price-alerts-with-a-dedicated-write-gate) and
+[The reusable write guard](#the-reusable-write-guard).
 
 **Why watchlist writes are not under the order gate.** The order gate's third
 condition, `LONGPORT_MODE=live`, exists because "live" means real money. A
@@ -980,6 +1001,188 @@ misconfigured environment.
 
 ---
 
+### `dca` — dollar-cost-averaging plans, with a dedicated write gate
+
+All **11** `DCAContext` methods. Five are read-only and unguarded; the six that
+change a plan sit behind the DCA gate described below.
+
+The read/write split is a **source fact** taken from `dca/context.go` in
+v0.25.2 — which endpoint each method calls, and whether that endpoint mutates —
+rather than inferred from the method name:
+
+| Action | SDK method | Endpoint | Guarded |
+| --- | --- | --- | --- |
+| `list` | `List` | `GET /v1/dailycoins/query` | no |
+| `history` | `History` | `GET /v1/dailycoins/query-records` | no |
+| `stats` | `Stats` | `GET /v1/dailycoins/statistic` | no |
+| `check-support` | `CheckSupport` | `POST /v1/dailycoins/batch-check-support` | no |
+| `calc-date` | `CalcDate` | `POST /v1/dailycoins/calc-trd-date` | no |
+| `create` | `Create` | `POST /v1/dailycoins/create` | **yes** |
+| `update` | `Update` | `POST /v1/dailycoins/update` | **yes** |
+| `pause` | `Pause` | `POST /v1/dailycoins/toggle` `Suspended` | **yes** |
+| `resume` | `Resume` | `POST /v1/dailycoins/toggle` `Active` | **yes** |
+| `stop` | `Stop` | `POST /v1/dailycoins/toggle` `Finished` | **yes** |
+| `set-reminder` | `SetReminder` | `POST /v1/dailycoins/update-alter-hours` | **yes** |
+
+Two things about that table are worth stating plainly, because both look like
+over-caution if you only skim it.
+
+**`check-support` and `calc-date` are POSTs, and are deliberately not guarded.**
+They compute an answer and change nothing server-side. Guarding a pure
+computation behind three switches would be theatre, and it would make
+`calc-date` — the one call you want in order to sanity-check a schedule *before*
+committing to it — awkward to use. A POST verb is not a mutation.
+
+**Pause, resume and stop share one endpoint**, differing only by a `status`
+string. So the guard is applied at the **method** level, in the dispatch switch
+in `cmd/dca/main.go`, before any context is created. There is no single
+"toggle" SDK call to hang a guard off; if the guard had been written against
+the endpoint it would have had nothing to attach to.
+
+```console
+# Read-only — no switches needed beyond credentials.
+go run ./cmd/dca -action list
+go run ./cmd/dca -action stats -symbol 700.HK
+go run ./cmd/dca -action history -plan-id <id> -limit 20
+go run ./cmd/dca -action check-support -symbol 700.HK
+go run ./cmd/dca -action calc-date -symbol 700.HK -frequency monthly -day-of-month 15
+
+# Writes — all three switches required.
+LONGPORT_DCA_DRY_RUN=0 LONGPORT_MODE=live \
+  go run ./cmd/dca -action create -symbol 700.HK -amount 1000 \
+    -frequency monthly -day-of-month 15 --confirm-live-dca
+LONGPORT_DCA_DRY_RUN=0 LONGPORT_MODE=live \
+  go run ./cmd/dca -action update -plan-id <id> -amount 2000 --confirm-live-dca
+LONGPORT_DCA_DRY_RUN=0 LONGPORT_MODE=live \
+  go run ./cmd/dca -action pause -plan-id <id> --confirm-live-dca
+LONGPORT_DCA_DRY_RUN=0 LONGPORT_MODE=live \
+  go run ./cmd/dca -action stop  -plan-id <id> --confirm-live-dca
+```
+
+| Flag | Default | Purpose |
+| --- | --- | --- |
+| `-action` | `list` | One of the eleven actions above. |
+| `-symbol` | — | **Required** for `create` and `calc-date`; optional filter for `stats`. |
+| `-amount` | — | Per-investment amount, decimal string. **Required** for `create`. |
+| `-frequency` | `monthly` | `daily`, `weekly`, `fortnightly` or `monthly`. |
+| `-day-of-week` | — | **Required** for `weekly`/`fortnightly`, e.g. `Monday`. |
+| `-day-of-month` | — | `1`-`31`, for `monthly`. Rejected above 31 locally. |
+| `-allow-margin` | `false` | Margin financing for a plan — real leverage. Guarded like any other write. |
+| `-plan-id` | — | **Required** for `update`, `pause`, `resume`, `stop`, `history`. |
+| `-reminder-hours` | — | **Required** for `set-reminder`; the SDK accepts `1`, `6` or `12`. |
+| `-confirm-live-dca` | `false` | **Required** for any write. |
+
+`-day-of-week` and `-day-of-month` are checked against `-frequency` locally:
+weekly/fortnightly without a weekday is rejected before any request, and
+supplying both is rejected, so you get a clear local error rather than an
+opaque one from the API.
+
+**There is no preview mode in the SDK.** There is no plan/preview method —
+`Create` creates the plan directly, and it starts investing on the schedule.
+So the command's own dry run is the only preview available, which is a large
+part of why the gate is three switches rather than one. `Stop` is likewise
+irreversible: a `Finished` plan cannot be resumed, and the dry-run output says
+so on the `WARNING` line.
+
+The gate is `config.DCAGuard`, built from the reusable `config.WriteGuard`
+helper described in [The reusable write guard](#the-reusable-write-guard). A
+refusal lists **every** unsatisfied condition at once, prints the request body
+under a `[DRY-RUN]` prefix, makes no network call, and exits **3**.
+
+---
+
+### `alert` — price alerts, with a dedicated write gate
+
+All **4** `AlertContext` methods. `List` is a read; `Add`, `Update` and `Delete`
+are behind the alert gate.
+
+| Action | SDK method | Endpoint | Guarded |
+| --- | --- | --- | --- |
+| `list` | `List` | `GET /v1/notify/reminders` | no |
+| `add` | `Add` | `POST /v1/notify/reminders` | **yes** |
+| `update` | `Update` | `POST /v1/notify/reminders` | **yes** |
+| `delete` | `Delete` | `DELETE /v1/notify/reminders` | **yes** |
+
+**Add and update share one endpoint.** The SDK tells them apart by whether the
+body carries an `id`: `Update` takes a whole `*AlertItem` obtained from `List`
+and echoes it back, `Add` builds a body with no `id` at all. There is no
+endpoint-level place to hang a guard here, so — exactly as with DCA's
+pause/resume/stop — the guard sits at the **method** level, in the dispatch
+switch, before any context is created.
+
+`Update` needs an `AlertItem` and the SDK has no get-by-id call, so the command
+resolves `-id` by calling `List`. That read happens **after** the gate, not
+before: a refusal that dials the API is not a refusal, and the guarantee that a
+blocked write makes no network call has to hold for every action. The cost is
+that the dry-run preview cannot show the resolved body — paid only when the
+gate is already open and a request was going out regardless.
+
+```console
+# Read-only.
+go run ./cmd/alert -action list
+
+# Writes — all three switches required.
+LONGPORT_ALERT_DRY_RUN=0 LONGPORT_MODE=live \
+  go run ./cmd/alert -action add -symbol 700.HK -condition price-rise -value 600 \
+    --confirm-live-alert
+LONGPORT_ALERT_DRY_RUN=0 LONGPORT_MODE=live \
+  go run ./cmd/alert -action update -id <id> -enabled=false --confirm-live-alert
+LONGPORT_ALERT_DRY_RUN=0 LONGPORT_MODE=live \
+  go run ./cmd/alert -action delete -id <id> --confirm-live-alert
+```
+
+| Flag | Default | Purpose |
+| --- | --- | --- |
+| `-action` | `list` | `list`, `add`, `update` or `delete`. |
+| `-symbol` | — | **Required** for `add`. |
+| `-condition` | `price-rise` | `price-rise`, `price-fall`, `percent-rise`, `percent-fall`. |
+| `-value` | — | Trigger threshold, decimal string. **Required** for `add`. |
+| `-frequency` | `once` | `daily`, `every-time` or `once`. |
+| `-id` | — | **Required** for `update` and `delete`. |
+| `-enabled` | `true` | For `update`: enable or disable the alert. |
+| `-confirm-live-alert` | `false` | **Required** for any write. |
+
+`ValueMap` is `json.RawMessage` in the SDK — the upstream shape is not stable —
+so the rendering in `-action list` and the dry-run preview is a pretty-printer,
+not a field mapping. `Delete` is irreversible: there is no undelete endpoint,
+and recreating the alert yields a new id and loses its trigger state, which the
+dry-run `WARNING` line says out loud.
+
+---
+
+## The reusable write guard
+
+Adding a third and fourth family of guarded mutations would have meant a third
+and fourth copy of the same three-line loop. That copy-paste is where safety
+bugs live — a variant that forgets to propagate the refusal, or forgets that
+the two switches must be *independent*, is easy to write and hard to spot. So
+the loop is written once, in `internal/config/writeguard.go`:
+
+```go
+type WriteGuard struct {
+	Name        string // "DCA" in messages
+	Description string // why this family of writes is sensitive
+	DryRunEnv   string // LONGPORT_DCA_DRY_RUN
+	ConfirmFlag string // --confirm-live-dca (documentation; the command owns the flag)
+	RequireLive bool   // demand LONGPORT_MODE=live
+}
+```
+
+A write proceeds only when **all three** conditions hold, and each is checked
+independently: a missing flag refuses even when the env is cleared, and the env
+refuses even when the flag is present. `Unsatisfied` returns *all* of the
+unmet conditions rather than the first, so one run tells the user everything
+they need to change. `DryRun` fails safe — unset, or unparseable, both mean
+"still in dry run" — and `ValidateDryRunEnv` rejects a bad value at startup
+rather than at the moment a write is refused.
+
+The next family of guarded writes should be one more `WriteGuard` value and one
+`gate` function, not a new copy of the loop. The commands print the
+`[DRY-RUN]`-prefixed request and return the refusal; `cli.Fail` turns that into
+exit 3.
+
+---
+
 ## Configuration reference
 
 Precedence: **environment variables beat the YAML file**, and the YAML file is
@@ -1026,6 +1229,8 @@ file` otherwise.
 | `LONGPORT_WATCHLIST_DRY_RUN` | `1` | Blocks watchlist writes. Must be `0` to write. See [the four gates](#the-four-safety-gates). |
 | `LONGPORT_SHARELIST_DRY_RUN` | `1` | Blocks sharelist writes. Must be `0` **and** `--confirm-live-sharelist` **and** `LONGPORT_MODE=live`. |
 | `LONGPORT_CONTENT_DRY_RUN` | `1` | Blocks publishing topics/replies. Must be `0` **and** `--confirm-live-content` **and** `LONGPORT_MODE=live`. |
+| `LONGPORT_DCA_DRY_RUN` | `1` | Blocks DCA plan writes. Must be `0` **and** `--confirm-live-dca` **and** `LONGPORT_MODE=live`. |
+| `LONGPORT_ALERT_DRY_RUN` | `1` | Blocks price-alert writes. Must be `0` **and** `--confirm-live-alert` **and** `LONGPORT_MODE=live`. |
 
 ### Exit codes
 
@@ -1092,6 +1297,19 @@ $ grep -hoE '^func \(c \*(Fundamental|Asset|Calendar)Context\) [A-Z][A-Za-z0-9]*
 $ # (no output = fully covered)
 ```
 
+And for `DCAContext` (11 methods, all in `cmd/dca`) and `AlertContext`
+(4 methods, all in `cmd/alert`):
+
+```console
+$ grep -hoE '^func \([cd] \*(DCA|Alert)Context\) [A-Z][A-Za-z0-9]*' \
+    "$BASE"/dca/*.go "$BASE"/alert/*.go \
+  | sed -E 's/.*\) //' | sort -u \
+  | while read -r m; do
+      grep -rqE "\.$m\(" cmd/ || echo "UNCOVERED: $m"
+    done
+$ # (no output = fully covered)
+```
+
 This is a **static** check: it proves every method is *referenced*, not that
 every method was *exercised against a live account*. No command in this repo
 has been run with a working access token, so no successful response has ever
@@ -1131,8 +1349,8 @@ What *was* verified by execution:
 
 - `gofmt -l .` reports nothing.
 - `go build ./...` and `go vet ./...` both exit 0.
-- All twelve binaries build; `-h` exits 0 with no credentials.
-- All twelve exit **2** with a readable missing-credentials message listing all
+- All fourteen binaries build; `-h` exits 0 with no credentials.
+- All fourteen exit **2** with a readable missing-credentials message listing all
   three variables, and no panic.
 - With dummy credentials, every command reaches the real Longbridge API and
   fails with `httpStatus:401 code:401004 message:token invalid` — proving the
@@ -1140,11 +1358,25 @@ What *was* verified by execution:
   checked for all three `warrant` actions, `watchlist -action list`, all seven
   read-only `executions` actions, all eleven `reference` sections, all fourteen
   `market` sections, all three read-only `sharelist` actions, all five
-  read-only `content` actions, all five `portfolio` actions and all
-  **thirty-three** `fundamentals` actions.
+  read-only `content` actions, all five `portfolio` actions, all
+  **thirty-three** `fundamentals` actions, all five read-only `dca` actions
+  and `alert -action list`.
 - Every write path is blocked in each of the non-sending configurations, and
   every refusal was confirmed to make **no** network call. The 26 sharelist
   and content write combinations all exit **3**.
+- The DCA and alert gates were swept exhaustively: **63 blocked cases** (6 DCA
+  actions × 7 switch combinations, 3 alert actions × 7) each exit **3**, print
+  a `[DRY-RUN]`-prefixed request and make no network call; and all **9** of
+  those actions, with all three switches satisfied, really do reach the API
+  and return a real 401. Every one of the three switches refuses on its own.
+- The same sweep re-checked the order and watchlist gates: 15 blocked
+  combinations still block and now exit **3**, and all 8 unblocked
+  combinations still reach the API. No guard was weakened.
+- A blocked write was measured at ~10ms against ~300ms for an equivalent
+  unblocked write to the real gateway, which is the empirical evidence that a
+  refusal dials nothing.
+- An unparseable `LONGPORT_DCA_DRY_RUN` or `LONGPORT_ALERT_DRY_RUN` is
+  rejected at startup, not silently treated as "on".
 - The static coverage check above finds no uncovered method.
 
 **A 401 is a real answer, not a successful one.** It proves the request was
@@ -1165,6 +1397,10 @@ Specifically verified about the guards:
 | `watchlist -action create` | default | blocked: missing `--confirm`, no network |
 | `watchlist -action create` | `--confirm` | blocked: watchlist dry run, no network |
 | `watchlist` create/update/pin/delete | `WATCHLIST_DRY_RUN=0 --confirm` | reached the API (401 on the dummy token) |
+| `dca` create/update/pause/resume/stop/set-reminder | any switch missing (7 combinations each) | **exit 3**, blocked, no network |
+| `dca` create/update/pause/resume/stop/set-reminder | `DCA_DRY_RUN=0` + flag + `MODE=live` | reached the API (401 on the dummy token) |
+| `alert` add/update/delete | any switch missing (7 combinations each) | **exit 3**, blocked, no network |
+| `alert` add/update/delete | `ALERT_DRY_RUN=0` + flag + `MODE=live` | reached the API (401 on the dummy token) |
 | `sharelist` create/delete/add/remove/sort | default | **exit 3**, blocked, no network |
 | `sharelist` create/delete/add/remove/sort | `--confirm-live-sharelist` only | **exit 3**, blocked (dry run still on), no network |
 | `sharelist` create/delete/add/remove/sort | `SHARELIST_DRY_RUN=0` only, no flag | **exit 3**, blocked (no flag), no network |
@@ -1212,6 +1448,28 @@ upstream, and three of them (`FinancialReport`, `ShareholderTop`,
 shape is not stable — so for those, the output is a pretty-printer, not a
 mapping, and the true field set is unknown until someone runs it with a real
 token. Expect to adjust this command more than any other in the repo.
+
+`cmd/dca` and `cmd/alert` are in the same category, with two extra caveats.
+First, their read/write split is a **source fact** — every method was read
+against `dca/context.go` and `alert/context.go` in v0.25.2 to see which
+endpoint it calls — but the *rendering* of a successful `DcaPlan`,
+`DcaHistoryRecord` or `AlertSymbolGroup` is written from the Go struct
+definitions alone, and **no successful DCA or alert response has ever been
+observed**. The `DCAStatus` and `DCAFrequency` conversions in particular are
+`switch` statements over wire strings; the SDK's own `statusFromString` maps
+anything unrecognised to `Active`, so an unexpected server value would be
+displayed as Active rather than as an error. Second, the SDK's DCA types are
+loosely typed in places — `DayOfWeek` and `DayOfMonth` are plain strings on
+`DcaPlan`, `AlterHours` is a string, and `PerInvestAmount` is a non-pointer
+`decimal.Decimal` so "absent" is indistinguishable from zero — so a plan field
+the API omits will print as `0` or `-` rather than "unknown". Expect to adjust
+this formatting once real data flows. `AlertItem.ValueMap` is
+`json.RawMessage` upstream, so the alert rendering is a pretty-printer by
+necessity.
+
+Nothing about the *guards* in either command is uncertain, and that is the part
+that matters: 63 blocked cases and 9 unblocked ones were each executed, and
+every one behaved exactly as specified.
 
 A wrinkle that used to exist and is now **fixed**: a **blocked** write in
 `cmd/trade` and `cmd/executions` used to exit **0**, because the gate printed
@@ -1281,13 +1539,16 @@ longbridge-go-demo/
 │   ├── sharelist/main.go   share lists: list, detail, popular + gated create/delete/add/remove/sort
 │   ├── content/main.go     topics, news, detail, replies, mine + gated create-topic/reply
 │   ├── portfolio/main.go   exchange rates and P&L analytics
+│   ├── dca/main.go         DCA plans: 5 reads + 6 gated plan changes
+│   ├── alert/main.go       price alerts: 1 read + 3 gated changes
 │   └── fundamentals/       the 32 fundamental methods, + asset & calendar
 │       ├── main.go         flags, validation, action dispatch
 │       └── actions.go      one renderer per SDK method
 ├── internal/
 │   ├── config/             env + YAML loader, mode/dry-run switch, redaction
 │   │   ├── config.go       credentials, LONGPORT_MODE, order gate
-│   │   ├── guard.go        the separate watchlist gate
+│   │   ├── guard.go        the separate watchlist gate; exit-3 refusal type
+│   │   ├── writeguard.go   the reusable WriteGuard behind the dca/alert gates
 │   │   └── file.go
 │   └── cli/                shared flag parsing, credential errors, panic guard
 ├── .env.example            every LONGPORT_*/LONGBRIDGE_* var, fully commented
