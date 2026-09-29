@@ -23,13 +23,19 @@ import (
 // and the distinction matters to anyone scripting this repo:
 //
 //	0  success — the command did what it was asked
-//	2  missing credentials or a usage error (a MissingCredentialError)
+//	2  missing credentials, and nothing else — a *MissingCredentialError
 //	3  BLOCKED — a safety guard refused a write; nothing was sent
-//	1  anything else, including failures from the real API
+//	1  anything else, including failures from the real API, and usage
+//	   errors — an unknown flag, or a flag value the command cannot use
 //
 // A guard refusal must never collapse into 0: the whole point of the gate is
 // that a script wrapping it can tell "I placed the order" from "the demo
 // declined to place it".
+//
+// WHY A USAGE ERROR IS NOT 2: the flag package returns a plain *flag.error,
+// which wraps neither sentinel, so it lands on 1. Reserving 2 for
+// *MissingCredentialError alone is what lets a script read it as "go and fix
+// your environment" without also having to handle "go and fix your flags".
 func Fail(err error) {
 	if err == nil {
 		return

@@ -3,6 +3,8 @@ package cli
 import (
 	"bytes"
 	"context"
+	"errors"
+	"flag"
 	"fmt"
 	"io"
 	"os"
@@ -473,9 +475,8 @@ func TestParse_UnknownFlagFails(t *testing.T) {
 	}
 	if res.code != 1 {
 		t.Errorf("unknown flag exited %d, want 1.\n"+
-			"NOTE: cli.Fail's doc comment (cli.go:26) and README's exit-code table "+
-			"both promise 2 for \"a usage error\"; only MissingCredentialError "+
-			"reaches 2 today, so a bad flag lands on the generic branch.",
+			"NOTE: only a *MissingCredentialError reaches 2; a flag error wraps "+
+			"neither sentinel, so a bad flag belongs on the generic branch.",
 			res.code)
 	}
 	for _, want := range []string{
@@ -509,6 +510,56 @@ func TestParse_HelpExitsZeroWithoutCredentials(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// ---------------------------------------------------------------------------
+// The exit-code boundary the Fail comment draws
+// ---------------------------------------------------------------------------
+
+// A usage error and a missing-credential error are the pair that must never be
+// confused: only the second is 2. Pinned from both sides through the re-exec
+// harness, because the doc bug this guards against is precisely the claim that
+// "a usage error" also exits 2 — which the code has never done.
+func TestExitCode_UsageErrorIsOneAndMissingCredentialsIsTwo(t *testing.T) {
+	usage := runHelper(t, "parse-unknown-flag")
+	if usage.code != 1 {
+		t.Errorf("a usage error (unknown flag) exited %d, want 1; only a "+
+			"*MissingCredentialError may exit 2.\nstderr:\n%s", usage.code, usage.stderr)
+	}
+
+	credentials := runHelper(t, "fail-missing-credentials")
+	if credentials.code != 2 {
+		t.Errorf("a missing-credential error exited %d, want 2.\nstderr:\n%s",
+			credentials.code, credentials.stderr)
+	}
+
+	if usage.code == credentials.code {
+		t.Errorf("both exit %d, so a wrapper script cannot tell \"fix your flags\" "+
+			"from \"fix your environment\"", usage.code)
+	}
+}
+
+// A flag the command cannot use is the same class of problem as an unknown
+// flag, and Fail classifies by type rather than by message, so a bad value can
+// never be routed to the credential branch by saying something credential-ish.
+func TestExitCode_AnUnusableFlagValueIsNotACredentialError(t *testing.T) {
+	fs := flag.NewFlagSet("demo", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	fs.IntVar(new(int), "count", 0, "an int flag")
+
+	err := fs.Parse([]string{"-count", "not-a-number"})
+	if err == nil {
+		t.Fatal(`parsing -count not-a-number succeeded; the premise of this test is gone`)
+	}
+
+	var missing *appcfg.MissingCredentialError
+	if errors.As(err, &missing) {
+		t.Errorf("a flag error is a *MissingCredentialError (%T), so Fail would exit 2 "+
+			"for what is only a usage problem", err)
+	}
+	if errors.Is(err, appcfg.ErrBlocked) {
+		t.Errorf("a flag error wraps ErrBlocked (%v), so Fail would exit 3", err)
 	}
 }
 
