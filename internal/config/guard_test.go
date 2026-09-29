@@ -70,9 +70,11 @@ func TestBlockedError_SurvivesWrapping(t *testing.T) {
 }
 
 func TestExitBlocked_IsThree(t *testing.T) {
-	// 0 is success, 1 is generic failure, 2 is the usage/missing-credential
-	// status. A refusal must be distinguishable from all three, or a wrapper
-	// script cannot tell "declined" from "ordered".
+	// 0 is success, 1 is a generic failure, and 2 is missing credentials and
+	// nothing else — a *MissingCredentialError. A usage error is NOT 2: the flag
+	// package returns a plain *flag.error, which exits 1. A refusal must be
+	// distinguishable from all three, or a wrapper script cannot tell "declined"
+	// from "ordered".
 	if ExitBlocked != 3 {
 		t.Fatalf("ExitBlocked = %d, want 3", ExitBlocked)
 	}

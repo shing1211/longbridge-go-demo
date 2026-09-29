@@ -13,13 +13,15 @@ import (
 //
 // # WHY 3
 //
-// 0 and 1 are already taken: 0 is success, 1 is a generic failure, and 2 is
-// the missing-credentials / usage status that cli.Fail assigns. A refusal is
-// none of those: the command did not fail, it correctly declined to act. Before
-// this constant existed, blocked writes returned nil and therefore exited 0,
-// which made a refusal indistinguishable from a completed order to any wrapper
-// script. 3 is also the convention already used by the sibling Tiger project,
-// so the two repos agree.
+// 0 and 1 are already taken: 0 is success, 1 is a generic failure — which
+// includes a usage error such as an unknown flag, because the flag package
+// returns a plain *flag.error that wraps neither sentinel — and 2 is the
+// missing-credentials status, reserved for a *MissingCredentialError and
+// nothing else (see cli.Fail). A refusal is none of those: the command did not
+// fail, it correctly declined to act. Before this constant existed, blocked
+// writes returned nil and therefore exited 0, which made a refusal
+// indistinguishable from a completed order to any wrapper script. 3 is also the
+// convention already used by the sibling Tiger project, so the two repos agree.
 //
 // Any command that guards a write MUST return an error wrapping ErrBlocked
 // when the guard refuses, so that cli.Fail turns it into this status.
