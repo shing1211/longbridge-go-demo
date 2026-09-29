@@ -61,11 +61,8 @@ func main() {
 	cfg := u.Load()
 	timeout = appcfg.Timeout()
 	fmt.Fprintf(os.Stderr, "[config] %s\n", cfg)
-	// SAFETY: this binary is read-only; if the order gate were open something
-	// is wrong with the environment and we should not keep going.
-	if err := cfg.GuardWrite("run the warrant reader"); err == nil {
-		cli.Fail(fmt.Errorf("internal invariant violated: warrant is read-only but the order gate is open"))
-	}
+	// SAFETY: read-only binary.
+	cli.AssertReadOnly(cfg, "warrant", "run the warrant reader")
 
 	cli.Run(func(ctx context.Context) error {
 		qc, err := quote.NewFromCfg(cfg.SDK)

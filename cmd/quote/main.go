@@ -46,10 +46,8 @@ func main() {
 	cfg := u.Load()
 	timeout = appcfg.Timeout()
 	fmt.Fprintf(os.Stderr, "[config] %s\n", cfg)
-	// SAFETY: this binary issues no writes. Assert the gate would stop it.
-	if err := cfg.GuardWrite("quote a symbol"); err == nil {
-		cli.Fail(fmt.Errorf("internal invariant violated: quote is read-only but the write gate is open"))
-	}
+	// SAFETY: read-only binary.
+	cli.AssertReadOnly(cfg, "quote", "quote a symbol")
 
 	cli.Run(func(ctx context.Context) error {
 		qc, err := quote.NewFromCfg(cfg.SDK)

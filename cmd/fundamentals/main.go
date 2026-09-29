@@ -110,11 +110,8 @@ func main() {
 	cfg := u.Load()
 	timeout = appcfg.Timeout()
 	fmt.Fprintf(os.Stderr, "[config] %s\n", cfg)
-	// SAFETY: this binary is read-only; if the order gate were open something
-	// is wrong with the environment and we should not keep going.
-	if err := cfg.GuardWrite("run the fundamentals reader"); err == nil {
-		cli.Fail(fmt.Errorf("internal invariant violated: fundamentals is read-only but the order gate is open"))
-	}
+	// SAFETY: read-only binary.
+	cli.AssertReadOnly(cfg, "fundamentals", "run the fundamentals reader")
 
 	if err := validateFlags(); err != nil {
 		cli.Fail(err)

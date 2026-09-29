@@ -58,6 +58,59 @@ func Fail(err error) {
 	os.Exit(1)
 }
 
+// AssertReadOnly states the invariant every read-only binary shares — the order
+// gate must still be closed at startup — and enforces it. name is the binary's
+// own name as it appears in the refusal; action is the phrase GuardWrite would
+// have printed had a write been attempted. A binary that issues no writes has
+// no guard of its own to catch a mistake, so if the gate would let it through
+// then the environment is wrong and the process stops before it can run.
+//
+// # WHY A HELPER INSTEAD OF EIGHT COPIES
+//
+// The eight read-only binaries each inlined the same four lines, and the copies
+// had already drifted: cmd/quote said "the write gate is open" where the other
+// seven, and the contract in README.md, say "the order gate". Nothing noticed,
+// because no test reached main() — with the inline copies put back and that
+// "write gate" wording restored, the whole suite still passed. The message now
+// exists once, so the noun cannot drift again, and
+// test/readonly_invariant_test.go fails if a read-only binary stops calling this
+// at all.
+//
+// WHY action STAYS A PARAMETER RATHER THAN BEING DERIVED FROM name: the eight
+// action strings genuinely differ ("run the market reader" is not "quote a
+// symbol"), and GuardWrite prints the action verbatim in its own refusal text.
+// Deriving it from name would rewrite what eight binaries say when a real write
+// is refused, and that message belongs to GuardWrite, not to this helper.
+//
+// # WHY A VIOLATION EXITS 1 AND NOT 3
+//
+// 3 means a guard refused a write and nothing was sent. Here the opposite
+// happened: nothing was refused, the gate was open. A read-only binary finding
+// an open gate is a misconfiguration, and README.md promises exit 1 for it. Do
+// not wrap this error in appcfg.Blockedf — that would report 3 and break the
+// documented contract.
+//
+// # TWO EDGES, BOTH PINNED BY TEST
+//
+// An empty action makes GuardWrite return its own "action description is
+// required" error, which this function reads as a closed gate, so the check
+// passes vacuously; callers must pass the real action string. A nil cfg has no
+// gate state at all and panics inside GuardWrite rather than passing silently;
+// every call site gets cfg from Usage.Load, which has already failed out if the
+// config did not load, so a nil there is a programming error worth the stack
+// trace.
+func AssertReadOnly(cfg *appcfg.Config, name, action string) error {
+	if err := cfg.GuardWrite(action); err == nil {
+		// Fail does not return for a non-nil error, but returning it keeps the
+		// function total: a caller that wanted to handle the violation itself
+		// rather than exit would not have to work around a missing value.
+		err := fmt.Errorf("internal invariant violated: %s is read-only but the order gate is open", name)
+		Fail(err)
+		return err
+	}
+	return nil
+}
+
 // Run executes fn, converting panics from the SDK into a normal error report
 // rather than a stack trace, and returning a process exit code.
 func Run(fn func(ctx context.Context) error) {

@@ -61,10 +61,8 @@ func main() {
 	cfg := u.Load()
 	timeout = appcfg.Timeout()
 	fmt.Fprintf(os.Stderr, "[config] %s\n", cfg)
-	// SAFETY: read-only binary. If the order gate were open, stop.
-	if err := cfg.GuardWrite("run the reference reader"); err == nil {
-		cli.Fail(fmt.Errorf("internal invariant violated: reference is read-only but the order gate is open"))
-	}
+	// SAFETY: read-only binary.
+	cli.AssertReadOnly(cfg, "reference", "run the reference reader")
 
 	want, err := parseSections(sections)
 	if err != nil {

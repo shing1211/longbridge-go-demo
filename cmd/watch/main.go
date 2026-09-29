@@ -5,6 +5,15 @@
 // context, and exits 0. It is read-only and places no orders — including under
 // -orders, which reads the account's order push feed without ever submitting,
 // replacing or cancelling anything.
+//
+// # WHY -orders DOES NOT MAKE THIS A WRITER
+//
+// The -orders path builds a TradeContext, the same context type cmd/trade uses
+// to submit orders, so it reads like a write path at a glance. It only calls
+// Subscribe/Unsubscribe on the order push feed: it never reaches SubmitOrder,
+// ReplaceOrder or CancelOrder, and a subscription changes nothing server-side.
+// So it is still a reader, which is why this binary asserts at startup that the
+// order gate is still closed instead of needing a gate of its own.
 package main
 
 import (
@@ -54,13 +63,8 @@ func main() {
 	cfg := u.Load()
 	timeout = appcfg.Timeout()
 	fmt.Fprintf(os.Stderr, "[config] %s\n", cfg)
-	// SAFETY: read-only binary. If the order gate were open, stop. The -orders
-	// path uses a TradeContext, but only to Subscribe/Unsubscribe a push feed:
-	// it never calls SubmitOrder, ReplaceOrder or CancelOrder, and a
-	// subscription changes nothing server-side, so it is still a reader.
-	if err := cfg.GuardWrite("run the watch streamer"); err == nil {
-		cli.Fail(fmt.Errorf("internal invariant violated: watch is read-only but the order gate is open"))
-	}
+	// SAFETY: read-only binary.
+	cli.AssertReadOnly(cfg, "watch", "run the watch streamer")
 
 	// The order stream is a different websocket on a different context, and it
 	// needs no symbols, so it takes a wholly separate path rather than being

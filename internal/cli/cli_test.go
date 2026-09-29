@@ -564,6 +564,130 @@ func TestExitCode_AnUnusableFlagValueIsNotACredentialError(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// AssertReadOnly
+// ---------------------------------------------------------------------------
+
+// readOnlyBinaries is the eight binaries that issue no writes, each with the
+// action string its own GuardWrite refusal would print if a write were
+// attempted. The same eight (name, action) pairs are pinned against the source
+// in test/readonly_invariant_test.go, so a call site that drifts from this
+// table fails there rather than leaving the table testing fiction.
+var readOnlyBinaries = []struct{ name, action string }{
+	{"quote", "quote a symbol"},
+	{"watch", "run the watch streamer"},
+	{"warrant", "run the warrant reader"},
+	{"reference", "run the reference reader"},
+	{"portfolio", "run the portfolio reader"},
+	{"fundamentals", "run the fundamentals reader"},
+	{"market", "run the market reader"},
+	{"screener", "run the screener reader"},
+}
+
+// closedGates are the configurations in which GuardWrite refuses, i.e. every
+// state a read-only binary can be started in except the misconfigured one. They
+// refuse for different reasons and say so in different text, so all three are
+// exercised rather than only the default.
+var closedGates = []struct {
+	label string
+	cfg   *appcfg.Config
+}{
+	{"dry run on, the default", &appcfg.Config{Mode: appcfg.ModeSimulated, DryRun: true}},
+	{"dry run off but mode not live", &appcfg.Config{Mode: appcfg.ModeSimulated, DryRun: false}},
+	{"mode never set", &appcfg.Config{}},
+}
+
+// openGate is the one configuration GuardWrite admits. Naming it as a single
+// shared value keeps the subprocess scenario that asserts the violation from
+// drifting away from what the guard actually does.
+var openGate = &appcfg.Config{Mode: appcfg.ModeLive, DryRun: false}
+
+// The invariant holds — silently — in every closed-gate configuration, and it
+// must hold for all eight binaries, not just the one the helper was written
+// for. The violated branch is deliberately absent here: Fail exits, so that
+// half of the helper is pinned from a child process instead
+// (TestAssertReadOnly_OpenGateExitsOneMisconfiguration).
+func TestAssertReadOnly_ClosedGateReturnsNil(t *testing.T) {
+	for _, gate := range closedGates {
+		for _, bin := range readOnlyBinaries {
+			t.Run(gate.label+"/"+bin.name, func(t *testing.T) {
+				// Precondition, so the loop above cannot pass vacuously if
+				// GuardWrite ever stops refusing in one of these states.
+				if err := gate.cfg.GuardWrite(bin.action); err == nil {
+					t.Fatalf("GuardWrite(%q) = nil in %s; the premise that this "+
+						"gate is closed is gone", bin.action, gate.label)
+				}
+				if err := AssertReadOnly(gate.cfg, bin.name, bin.action); err != nil {
+					t.Errorf("AssertReadOnly(%s, %q) = %v, want nil: the gate is "+
+						"closed, so the invariant holds", bin.name, bin.action, err)
+				}
+			})
+		}
+	}
+}
+
+// Pin the premise the violation rests on. GuardWrite refuses everything except
+// live-with-dry-run-off, so that single cell is the only way a read-only binary
+// can find its own gate open — and the only one worth reporting. What it cannot
+// do in-process is assert the report, since Fail exits; that half is the child
+// process's job.
+func TestAssertReadOnly_OpenGateIsTheOnlyCellGuardWriteAdmits(t *testing.T) {
+	if err := openGate.GuardWrite("run the market reader"); err != nil {
+		t.Fatalf("GuardWrite refused in %+v, so the open gate no longer exists "+
+			"and nothing can violate the invariant: %v", openGate, err)
+	}
+	// Also the other direction: a mode spelled but not live must not slip
+	// through. GuardWrite uses `!= live` rather than `== simulated` for
+	// exactly this reason, and the read-only assertion inherits that choice.
+	for _, mode := range []appcfg.Mode{appcfg.ModeSimulated, "", appcfg.Mode("LIVE")} {
+		cfg := &appcfg.Config{Mode: mode, DryRun: false}
+		if err := cfg.GuardWrite("run the market reader"); err == nil {
+			t.Errorf("GuardWrite admitted mode %q with dry run off; the gate is "+
+				"meant to be closed unless LONGPORT_MODE is exactly live", mode)
+		}
+	}
+}
+
+func TestAssertReadOnly_EdgesArePinned(t *testing.T) {
+	t.Run("an empty action makes the check pass vacuously", func(t *testing.T) {
+		// GuardWrite refuses an empty action with its own plain error ("action
+		// description is required"), and a refusal is exactly what this helper
+		// reads as "the gate is closed". So an empty action is a silent no-op
+		// even with the gate open, which is why every call site passes the
+		// action it would have handed to GuardWrite. Pinned because the failure
+		// it invites is invisible: nothing errors, the binary just runs.
+		if err := openGate.GuardWrite(""); err == nil {
+			t.Fatal(`GuardWrite("") = nil; the empty-action behaviour this test ` +
+				"pins has changed")
+		}
+		if err := AssertReadOnly(openGate, "market", ""); err != nil {
+			t.Errorf("AssertReadOnly with an empty action = %v, want nil, because "+
+				"GuardWrite's own complaint is read as a closed gate", err)
+		}
+	})
+
+	t.Run("a nil config panics instead of passing silently", func(t *testing.T) {
+		// GuardWrite dereferences c.DryRun, so a nil *Config has no gate state
+		// to read. That panic is kept deliberately: returning nil would let a
+		// read-only binary sail past the one assertion that is supposed to
+		// prove it cannot write, which is the failure this helper exists to
+		// prevent. Every call site gets cfg from Usage.Load, which has already
+		// failed out if the config did not load, so no call site can reach it.
+		defer func() {
+			r := recover()
+			if r == nil {
+				t.Fatal("AssertReadOnly(nil, …) returned instead of panicking; a " +
+					"silent return would read as \"the gate is closed\", which is " +
+					"the one answer that must never come from an unread config")
+			}
+			if msg := fmt.Sprint(r); !strings.Contains(msg, "nil pointer") {
+				t.Errorf("panicked with %q, want a nil-pointer dereference", msg)
+			}
+		}()
+		_ = AssertReadOnly(nil, "market", "run the market reader")
+	})
+}
+
+// ---------------------------------------------------------------------------
 // Usage text (documentation contract)
 // ---------------------------------------------------------------------------
 

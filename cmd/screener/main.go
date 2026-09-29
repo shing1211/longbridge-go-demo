@@ -148,10 +148,8 @@ func main() {
 	cfg := u.Load()
 	timeout = appcfg.Timeout()
 	fmt.Fprintf(os.Stderr, "[config] %s\n", cfg)
-	// SAFETY: this binary is read-only. If the order gate were open, stop.
-	if err := cfg.GuardWrite("run the screener reader"); err == nil {
-		cli.Fail(fmt.Errorf("internal invariant violated: screener is read-only but the order gate is open"))
-	}
+	// SAFETY: read-only binary.
+	cli.AssertReadOnly(cfg, "screener", "run the screener reader")
 
 	plan, err := buildPlan()
 	if err != nil {

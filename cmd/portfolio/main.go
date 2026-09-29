@@ -62,9 +62,7 @@ func main() {
 	fmt.Fprintf(os.Stderr, "[config] %s\n", cfg)
 	// SAFETY: this binary is read-only; an open order gate here would mean the
 	// environment is wrong, not that we should start writing.
-	if err := cfg.GuardWrite("run the portfolio reader"); err == nil {
-		cli.Fail(fmt.Errorf("internal invariant violated: portfolio is read-only but the order gate is open"))
-	}
+	cli.AssertReadOnly(cfg, "portfolio", "run the portfolio reader")
 
 	cli.Run(func(ctx context.Context) error {
 		// The portfolio package has no Close(); it is a thin HTTP client.

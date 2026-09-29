@@ -146,6 +146,19 @@ func TestHelperProcess(t *testing.T) {
 		cfg := &appcfg.Config{Mode: appcfg.ModeSimulated, DryRun: true}
 		Fail(appcfg.AlertGuard.Check(cfg, true, "delete price alert 99"))
 
+	// --- the invariant the eight read-only binaries share -------------------
+	case "read-only-assertion-open-gate":
+		// Their startup assertion, with the order gate open. Name and action
+		// arrive in the environment so that one scenario can stand in for all
+		// eight binaries; it defaults to market so it still means something if
+		// it is ever run on its own. openGate is the single config the closed-
+		// gate table in cli_test.go proves GuardWrite admits.
+		name, action := os.Getenv("HELPER_NAME"), os.Getenv("HELPER_ACTION")
+		if name == "" || action == "" {
+			name, action = "market", "run the market reader"
+		}
+		AssertReadOnly(openGate, name, action)
+
 	// --- Parse ------------------------------------------------------------
 	case "parse-unknown-flag":
 		NewUsage("demo", "a summary line").Parse([]string{"-nope"})
@@ -294,6 +307,14 @@ func TestFail_ExitCodeContract(t *testing.T) {
 			scenario: "fail-generic-wrapped-blocked-lookalike",
 			want:     1,
 			wantErr:  []string{"blocked by safety guard"},
+		},
+		{
+			name:     "an open gate in a read-only binary is a misconfiguration",
+			scenario: "read-only-assertion-open-gate",
+			want:     1,
+			wantErr: []string{
+				"internal invariant violated: market is read-only but the order gate is open",
+			},
 		},
 	}
 	for _, tt := range tests {
@@ -496,6 +517,40 @@ func TestUsage_LoadWithoutCredentialsExitsTwo(t *testing.T) {
 		if strings.Contains(res.stderr, secret+"=") {
 			t.Errorf("stderr looks like it echoes a credential (%s=).\nstderr:\n%s", secret, res.stderr)
 		}
+	}
+}
+
+// An open order gate in a read-only binary is a misconfiguration, not a
+// refusal, so it exits 1 — nothing was blocked, because nothing was ever
+// attempted, and 3 would tell a wrapping script that a write had been declined.
+// The stderr is pinned byte for byte rather than by substring, because the
+// whole reason this assertion became a helper is that eight copies of the
+// string had already drifted: cmd/quote said "the write gate is open" where the
+// contract in README.md says "the order gate", and no test noticed.
+func TestAssertReadOnly_OpenGateExitsOneMisconfiguration(t *testing.T) {
+	for _, bin := range readOnlyBinaries {
+		t.Run(bin.name, func(t *testing.T) {
+			res := runHelper(t, "read-only-assertion-open-gate",
+				"HELPER_NAME="+bin.name, "HELPER_ACTION="+bin.action)
+			if res.code != 1 {
+				t.Errorf("exit code = %d, want 1; 3 is reserved for a guard that "+
+					"refused a write, and nothing was attempted here.\nstdout:\n%s\nstderr:\n%s",
+					res.code, res.stdout, res.stderr)
+			}
+			want := fmt.Sprintf("error: internal invariant violated: %s is read-only "+
+				"but the order gate is open\n", bin.name)
+			if res.stderr != want {
+				t.Errorf("stderr = %q, want exactly %q", res.stderr, want)
+			}
+			if res.stdout != "" {
+				t.Errorf("stdout = %q, want empty: the report belongs on stderr", res.stdout)
+			}
+			// The child must have exited from Fail, not fallen out of the bottom
+			// of the switch, so the harness's fallthrough marker must be absent.
+			if strings.Contains(res.stdout, "returned without exiting") {
+				t.Errorf("AssertReadOnly returned instead of exiting.\nstdout:\n%s", res.stdout)
+			}
+		})
 	}
 }
 
