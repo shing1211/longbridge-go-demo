@@ -3,7 +3,9 @@
 .env.*
 !.env.example
 
-# Local config with real values.
+# Local config with real values. Only config.yaml and config.local.yaml are
+# loaded (see internal/config/file.go); .yml and .toml are ignored as well so a
+# stale one cannot sit in the tree looking supported.
 config.yaml
 config.local.yaml
 config.yml

@@ -145,26 +145,25 @@ func EnvDocLines() []string {
 // Load reads configuration and validates it.
 //
 // Precedence for each credential: env var, then YAML file (if one is found).
-// When the file argument is "" the conventional file names config.yaml,
-// config.local.yaml, config.yml and config.toml are tried in that order, and
-// their absence is not an error.
+// When the file argument is "" the conventional file names config.yaml and
+// config.local.yaml are tried in that order, and their absence is not an error.
+// An explicit file argument must name a .yaml file: this loader parses YAML
+// only, and the SDK's own TOML reader is not wired up here.
 //
 // It returns a *MissingCredentialError listing every absent credential, or a
 // plain error describing a bad value. It never panics and never returns nil.
 func Load(file string) (*Config, error) {
 	vals := make(map[string]string, len(credSpecs)) // yamlKey -> value
-	yamlKeys := make([]string, 0, len(credSpecs))
 
 	// Pass 1: env wins.
 	for _, s := range credSpecs {
 		if v := lookupEnv(s.envNames); v != "" {
 			vals[s.yamlKey] = v
 		}
-		yamlKeys = append(yamlKeys, s.yamlKey)
 	}
 
-	// Pass 2: fill gaps from a YAML/TOML file.
-	usedFile, err := loadFileInto(vals, yamlKeys, file)
+	// Pass 2: fill gaps from a YAML file.
+	usedFile, err := loadFileInto(vals, file)
 	if err != nil {
 		return nil, err
 	}
