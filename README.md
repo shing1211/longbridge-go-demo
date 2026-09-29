@@ -2119,8 +2119,8 @@ What *was* verified by execution:
 - `go build ./...` and `go vet ./...` both exit 0.
 - `make verify` is green: `fmt-check`, `vet`, `test` (`go test -race ./...`),
   `build`, and `coverage-check`.
-- The test suite passes: **451** test functions across **16** packages,
-  **2 576** passing cases including subtests, one helper-process test skipped.
+- The test suite passes: **456** test functions across **16** packages,
+  **2 608** passing cases including subtests, one helper-process test skipped.
   See [Development](#development).
 - The suite is green under `-race`, `-count=2` and `-shuffle=on`, under a
   deliberately hostile `env -i` environment, with poisoned
@@ -2137,8 +2137,10 @@ What *was* verified by execution:
   green, and both are now caught. The full record is under
   [Development](#development).
 - Every other new test assertion was **mutation-checked** the same way: the
-  production code was reverted with the tests kept, and 16 of the 18 mutations
-  tried turn the suite red with the specific test that was written for them.
+  production code was reverted with the tests kept, and all **22** mutations
+  tried — the 18 of the earlier rounds and the 4 added with the `cmd/watchlist`
+  dispatcher — turn the suite red with the specific test that was written for
+  them.
 - All **fifteen** binaries build; `-h` exits 0 with no credentials.
 - All fifteen exit **2** with a readable missing-credentials message listing all
   three variables, and no panic.
@@ -2404,13 +2406,13 @@ sdk coverage: 153/153 context methods covered
 | `cmd/alert` | 25 | 121 | 44.2% |
 | `cmd/trade` | 23 | 129 | 35.7% |
 | `cmd/screener` | 20 | 135 | 41.6% |
+| `cmd/watchlist` | 18 | 101 | 50.0% |
 | `cmd/content` | 16 | 92 | 31.0% |
 | `cmd/executions` | 16 | 115 | 17.2% |
 | `cmd/reference` | 16 | 100 | 8.6% |
-| `cmd/watchlist` | 13 | 69 | 44.9% |
 | `cmd/quote` | 8 | 60 | 12.0% |
 | `test` | 3 | 18 | *no statements* |
-| **Total** | **451** | **2 577** (2 576 pass + 1 skip) | — |
+| **Total** | **456** | **2 609** (2 608 pass + 1 skip) | — |
 
 Sorted by test functions. `cmd/portfolio` and `cmd/watch` have no test file and
 so appear in no row; `go test -cover ./...` reports them at 0.0%. The `test`
@@ -2423,11 +2425,11 @@ meaningful when re-executed by its parent. To reproduce the totals:
 
 ```console
 $ go test -count=1 -v ./... 2>&1 | grep -cE '^\s*--- PASS'
-2576
+2608
 $ go test -count=1 -v ./... 2>&1 | grep -cE '^\s*--- SKIP'
 1
 $ grep -rhE '^func Test' --include='*_test.go' . | wc -l
-451
+456
 $ go test -cover ./... | wc -l
 18
 $ make build && ls bin | wc -l
@@ -2457,10 +2459,14 @@ The SDK offers **no seam** to fake one: it is a concrete struct over a concrete
 HTTP client and websocket, there is no interface to substitute, and there is no
 exported constructor that takes a transport. A test that wants to exercise
 `printBrokerHolding` therefore has to hold a real `*market.MarketContext`, which
-means credentials and a network round trip. **136 functions in this repo are at
+means credentials and a network round trip. **137 functions in this repo are at
 0.0% statement coverage**: all 15 `main()` functions, and 86 of the 110 `print*`
-functions — the rest of that list is `do*` and `execute` bodies that sit behind
-the same wall.
+functions — the rest of that list is `do*` and `execute` bodies, plus
+`cmd/watchlist`'s `dispatch`, that sit behind the same wall. The count is
+`go test -count=1 -coverprofile=/tmp/cover.out ./...` followed by
+`go tool cover -func=/tmp/cover.out | grep -cE '[[:space:]]0\.0%$'`; counting
+per package instead adds two, because `go tool cover -func` prints a `total:`
+line that ends in `0.0%` for each of the two binaries that have no test file.
 
 So the `cmd/*` suites deliberately aim at the part that is testable and that
 bites: **the conversion of the SDK's bare-`int` enums, and the flag validation
@@ -2581,6 +2587,11 @@ Stated plainly, because the percentages above invite the wrong conclusion:
   `main()` functions and 86 of the 110 `print*` functions are at 0.0%. The
   source-parsing tests in `test/` do not change this: they read `main.go` as
   syntax and never execute it.
+- **The client lifecycle behind a dispatcher's switch.** `cmd/watchlist`'s switch
+  — which action is gated and which is a read — is now tested directly, but
+  `dispatch` itself is still at 0.0%: building the quote context is the seam the
+  tests substitute for, so nothing executes the function that would do it. The
+  switch is covered; the client creation around it is not.
 - **Whether a read-only binary really is read-only.** The parser pins that all
   eight call `cli.AssertReadOnly` and that the seven that can write do not. It
   cannot check the judgement itself — that a binary classified as read-only
@@ -2649,6 +2660,36 @@ So the two-count is now **18 of 18**. The honest accounting is that two of them
 needed a new kind of test rather than another assertion: `main()` cannot be
 called from a test, so `test/` reads the source instead. See
 [the read-only invariant](#the-read-only-invariant-eight-binaries-assert-it).
+
+**The `cmd/watchlist` dispatcher round adds four more, and all four went red.**
+Each is a one-line edit to the switch that maps `-action` onto a handler, which
+is why that round's tests were written against the switch rather than against the
+handlers: a mutation in the switch leaves every per-handler test green.
+
+```console
+$ # add a gate() call to the "list" case, keep the tests
+$ go test -count=1 ./cmd/watchlist/
+--- FAIL: TestRoute_ListIsNotGatedEvenWithTheGateFullyShut (0.00s)
+    main_test.go:796: route(list) never called connect() with the gate shut; the read was refused by a guard, and reads are not gated
+$ # wire -action create to the delete handler
+$ go test -count=1 ./cmd/watchlist/
+--- FAIL: TestRoute_EachActionReachesTheHandlerItNames (0.00s)
+    --- FAIL: TestRoute_EachActionReachesTheHandlerItNames/create (0.00s)
+        main_test.go:845: route("create") preview does not name "CreateWatchlistGroup", so -action "create" is wired to a different handler.
+$ # let an unrecognised -action fall through instead of being named as a usage error
+$ go test -count=1 ./cmd/watchlist/
+--- FAIL: TestRoute_AnUnknownActionIsRejectedLocallyWithoutAClient (0.00s)
+    --- FAIL: …/a_typo (0.00s)
+        main_test.go:876: route("nope") = nil; a mistyped action would silently do nothing and exit 0
+$ # drop the strings.ToLower from the switch
+$ go test -count=1 ./cmd/watchlist/
+--- FAIL: TestRoute_ActionNamesAreCaseInsensitive (0.01s)
+    --- FAIL: TestRoute_ActionNamesAreCaseInsensitive/list/LIST (0.00s)
+        main_test.go:932: route("LIST") called connect() 0 time(s), route("list") called it 1; the case fold changed whether the SDK was reached
+```
+
+The tally across every mutation this pass has tried is therefore **22 tried, 22
+red** — the original eighteen, all of which are caught now, and these four.
 
 The reason this matters is in [Honest status](#honest-status): the `-frequency`
 default is precisely the class of bug a unit-test suite is **structurally blind
@@ -2791,8 +2832,8 @@ longbridge-go-demo/
 └── README.md
 ```
 
-`cmd/*/main_test.go` (and `cmd/fundamentals/actions_test.go`) hold the 324
-test functions and 1 933 cases for the thirteen binaries that have a suite, and
+`cmd/*/main_test.go` (and `cmd/fundamentals/actions_test.go`) hold the 329
+test functions and 1 965 cases for the thirteen binaries that have a suite, and
 `test/` adds 3 more functions and 18 cases that no single package could hold;
 see [Development](#development) for the per-package table and for why the coverage
 percentages there are lower than they look. `cmd/portfolio` and `cmd/watch` have
