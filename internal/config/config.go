@@ -353,6 +353,17 @@ func Timeout() time.Duration {
 // It must be consulted immediately before SubmitOrder, ReplaceOrder and
 // CancelOrder. It returns nil only when the operator has disabled dry run.
 // The caller must treat any error from this function as "do not call the SDK".
+//
+// # WHY THE MODE TEST IS `!= live`, NOT `== simulated`
+//
+// The rule is "allow only exactly ModeLive", never "refuse only exactly
+// ModeSimulated". The permissive form lets a Config whose Mode was never set
+// (""), mistyped ("LIVE") or invented ("paper") place a real order, and it
+// disagreed with WriteGuard.Unsatisfied in this same package, which has always
+// used the fail-closed form. Load cannot currently produce such a Config, so
+// the difference was latent rather than a live leak — but a latent hole in the
+// one function that guards money is still a hole, so the deny-by-default form
+// wins. Do not "simplify" this back to `c.Mode == ModeSimulated`.
 func (c *Config) GuardWrite(action string) error {
 	if action == "" {
 		return errors.New("GuardWrite: action description is required")
@@ -366,13 +377,13 @@ func (c *Config) GuardWrite(action string) error {
 				"Both are required; either one alone still blocks the write.",
 			action, c.Mode)
 	}
-	if c.Mode == ModeSimulated {
+	if c.Mode != ModeLive {
 		return Blockedf(
-			"refusing to %s: mode is \"simulated\" but dry run is disabled.\n"+
+			"refusing to %s: mode is %q but dry run is disabled.\n"+
 				"No order was sent. Either restore LONGPORT_DRY_RUN=1, or set\n"+
 				"  LONGPORT_MODE=live\n"+
 				"to state that these are real-money credentials.",
-			action)
+			action, c.Mode)
 	}
 	return nil
 }
