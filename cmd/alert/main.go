@@ -350,7 +350,15 @@ func describe(fields map[string]string) {
 	}
 }
 
+// findAlert resolves an id to the item Update has to echo back, because the SDK
+// has no get-by-id call. A nil list is not a special case to handle differently
+// from an empty one: there is no alert with that id either way, so the caller
+// gets the same "not found" answer and doUpdate stops before it can send
+// anything.
 func findAlert(list *alert.AlertList, id string) (*alert.AlertItem, string, error) {
+	if list == nil {
+		list = &alert.AlertList{}
+	}
 	for _, g := range list.Lists {
 		for _, it := range g.Indicators {
 			if it.ID == id {
@@ -377,8 +385,17 @@ func parseCondition(s string) (alert.AlertCondition, error) {
 		"unknown -condition %q: want price-rise, price-fall, percent-rise or percent-fall", s)
 }
 
+// parseFrequency maps -frequency to the alert frequency code. A value that is
+// only whitespace is refused like any other unrecognised word: it used to trim
+// to "" and so resolve to the documented default "once", which made a flag the
+// user got wrong look exactly like one they never passed. Padding a real word
+// (" Once ") is still normalised, because that is a typo rather than a value.
 func parseFrequency(s string) (alert.AlertFrequency, error) {
-	switch strings.ToLower(strings.TrimSpace(s)) {
+	norm := strings.ToLower(strings.TrimSpace(s))
+	if norm == "" && s != "" {
+		return 0, fmt.Errorf("unknown -frequency %q: want daily, every-time or once", s)
+	}
+	switch norm {
 	case "daily":
 		return alert.AlertFrequencyDaily, nil
 	case "every-time", "everytime", "always":
