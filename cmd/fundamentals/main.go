@@ -76,7 +76,8 @@ func main() {
 	u := cli.NewUsage("fundamentals", "read-only company fundamentals, asset statements and financial calendar")
 	u.FS.StringVar(&action, "action", "valuation",
 		"see the -action list in -h output; one SDK method per action, plus `all-symbol` to run the main per-symbol set")
-	u.FS.StringVar(&symbol, "symbol", "700.HK", "primary symbol (700.HK, AAPL.US, 000001.SH, 3067.HK)")
+	u.FS.StringVar(&symbol, "symbol", "700.HK", "primary symbol (700.HK, AAPL.US, 000001.SH, 3067.HK); "+
+		"industry-rank and industry-peers take their market from this suffix, which must be HK, US, CN, SG or UK")
 	u.FS.StringVar(&kind, "kind", "all", "for -action report: is, bs, cf or all")
 	u.FS.StringVar(&period, "period", "", "for -action report: af, saf, q1, q2, q3, qf, 3q (empty = server default)")
 	u.FS.StringVar(&peers, "peers", "MSFT.US,GOOGL.US", "peer symbols for -action valuation-compare")
@@ -85,7 +86,8 @@ func main() {
 	u.FS.IntVar(&fiscalYear, "fiscal-year", 0, "fiscal year for -action snapshot (0 = omit)")
 	u.FS.StringVar(&fiscalPer, "fiscal-period", "", "fiscal period for -action snapshot, e.g. Q4")
 	u.FS.StringVar(&cate, "cate", "", "category filter for -action segments-history")
-	u.FS.StringVar(&indicators, "indicator", "0", "for -action industry-rank: 0-7 (numeric only; the SDK defines no names)")
+	u.FS.StringVar(&indicators, "indicator", "0", "for -action industry-rank: one digit, 0-7 (whitespace around it is ignored; "+
+		"the SDK defines no names for these codes)")
 	u.FS.StringVar(&sortType, "sort-type", "1", "for -action industry-rank: 0 ascending, 1 descending")
 	u.FS.IntVar(&limit, "limit", 20, "row cap for industry-rank, macro-indicators and macro")
 	u.FS.Int64Var(&objectID, "object-id", 0, "shareholder id for -action shareholder-detail (from -action shareholder)")
@@ -139,6 +141,14 @@ func main() {
 
 // validateFlags rejects the inputs that can be checked before any network call,
 // so an obvious typo costs nothing.
+//
+// The vocabulary checks delegate to the same parsers the action functions use
+// rather than repeating their word lists. Two copies of one vocabulary is how
+// "unknown -sort-type" ends up printed for a value the parser would have
+// accepted — this layer used to lower-case without trimming while every parser
+// trimmed, so `-sort-type " 1 "` was called unknown here and valid next door.
+// Delegating also means the two can never disagree about what is accepted
+// again, which is the only reason a startup error is trustworthy.
 func validateFlags() error {
 	if strings.TrimSpace(symbol) == "" {
 		return fmt.Errorf("-symbol is empty")
@@ -155,23 +165,20 @@ func validateFlags() error {
 	if macroOffset < 0 {
 		return fmt.Errorf("-macro-offset must not be negative, got %d", macroOffset)
 	}
-	switch strings.ToLower(statementTy) {
-	case "daily":
-	case "monthly":
-	default:
-		return fmt.Errorf("unknown -statement-type %q: want daily or monthly", statementTy)
+	if _, err := parseStatementType(statementTy); err != nil {
+		return err
 	}
-	switch strings.ToLower(calCategory) {
-	case "report", "dividend", "split", "ipo", "macrodata", "closed", "meeting", "merge":
-	default:
-		return fmt.Errorf("unknown -calendar-category %q: want report, dividend, split, ipo, "+
-			"macrodata, closed, meeting or merge", calCategory)
+	if _, err := parseCalendarCategory(calCategory); err != nil {
+		return err
 	}
-	switch strings.ToLower(sortType) {
-	case "0", "asc", "ascending":
-	case "1", "desc", "descending":
-	default:
-		return fmt.Errorf("unknown -sort-type %q: want 0 (ascending) or 1 (descending)", sortType)
+	if _, err := parseIndustryRankSort(sortType); err != nil {
+		return err
+	}
+	// -indicator is checked here as well as in the action, because a bad value
+	// used to be discovered only at the end of a long industry-rank run, after
+	// the contexts were built and the requests were made.
+	if _, err := parseIndustryRankIndicator(indicators); err != nil {
+		return err
 	}
 	return nil
 }
@@ -316,6 +323,23 @@ func withTimeout(parent context.Context) (context.Context, context.CancelFunc) {
 	return context.WithTimeout(parent, timeout)
 }
 
+// financialReportKindInvalid is what parseKind returns alongside its error.
+//
+// The zero value was the wrong choice here: fundamental.FinancialReportKind is
+// a bare int enum whose first member is FinancialReportKindIncomeStatement, so
+// `return 0, err` handed back a *valid* kind. A caller that forgot to check the
+// error would print the income statement under a heading built from the flag the
+// user actually typed, and nothing in the output would say the value was never
+// parsed. printFinancialReport checks the error today; this is about the next
+// caller.
+//
+// -1 is outside the enum: the SDK declares four members with iota and no
+// negative ones (fundamental/types.go, v0.25.2), so the valid range is 0..3.
+// TestParseKind_TheErrorValueIsNotAKind pins those four numbers as well, so an
+// SDK that ever adds a negative member fails there instead of quietly making
+// this sentinel valid.
+const financialReportKindInvalid fundamental.FinancialReportKind = -1
+
 func parseKind(s string) (fundamental.FinancialReportKind, error) {
 	switch strings.ToLower(strings.TrimSpace(s)) {
 	case "is", "income", "income_statement":
@@ -327,7 +351,7 @@ func parseKind(s string) (fundamental.FinancialReportKind, error) {
 	case "all":
 		return fundamental.FinancialReportKindAll, nil
 	}
-	return 0, fmt.Errorf("unknown -kind %q: want is, bs, cf or all", s)
+	return financialReportKindInvalid, fmt.Errorf("unknown -kind %q: want is, bs, cf or all", s)
 }
 
 func parsePeriod(s string) (*fundamental.FinancialReportPeriod, error) {
@@ -393,16 +417,25 @@ func parseElementType(t fundamental.ElementType) string {
 	return "unknown(" + strconv.Itoa(int(t)) + ")"
 }
 
-func parseImportance(i int32) string {
+// parseImportance renders MacroeconomicImportance, the macro indicator's
+// low/medium/high level.
+//
+// The SDK's field is a bare int32, so an absent level decodes to 0 — a value
+// the enum does not define. Printing that as "0" in an IMPORT. column would
+// read as a real measurement, so the default branch marks it the way
+// parseRecommend and parseElementType do. The cases name the SDK constants
+// rather than 1/2/3 so a renumbering or a dropped level in the SDK shows up
+// here instead of silently redefining what "high" means.
+func parseImportance(i fundamental.MacroeconomicImportance) string {
 	switch i {
-	case 1:
+	case fundamental.MacroeconomicImportanceLow:
 		return "low"
-	case 2:
+	case fundamental.MacroeconomicImportanceMedium:
 		return "medium"
-	case 3:
+	case fundamental.MacroeconomicImportanceHigh:
 		return "high"
 	}
-	return strconv.Itoa(int(i))
+	return "unknown(" + strconv.Itoa(int(i)) + ")"
 }
 
 // raw pretty-prints an untyped SDK field, truncated with an explicit marker.
@@ -430,8 +463,13 @@ func raw(b json.RawMessage) string {
 	return s
 }
 
+// fmtTimePtr renders an optional timestamp, or "-" when the API did not send
+// one. A *time.Time field that is omitted decodes to the zero time rather than
+// to nil, so IsZero — not a nil check — is what separates "absent" from a real
+// instant; 0001-01-01 would otherwise print as a plausible date. Same rule as
+// the fmtTime helpers in cmd/content and cmd/sharelist.
 func fmtTimePtr(t *time.Time) string {
-	if t == nil {
+	if t == nil || t.IsZero() {
 		return "-"
 	}
 	return t.UTC().Format("2006-01-02 15:04:05")

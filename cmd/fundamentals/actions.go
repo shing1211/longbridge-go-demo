@@ -16,6 +16,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/longbridge/openapi-go"
 	"github.com/longbridge/openapi-go/asset"
 	"github.com/longbridge/openapi-go/calendar"
 	"github.com/longbridge/openapi-go/fundamental"
@@ -957,7 +958,10 @@ func printEtfAllocation(ctx context.Context, fc *fundamental.FundamentalContext)
 //
 // Indicator and sort type are bare strings in the SDK ("0".."7", "0"/"1")
 // with no name mapping, so -indicator is numeric on purpose: inventing names
-// for undocumented codes would be worse than showing the code.
+// for undocumented codes would be worse than showing the code. Both are parsed
+// here as well as at startup, because the parsed constant is what the request
+// carries — a code the SDK does not define would otherwise go out verbatim and
+// come back as an empty ranking that reads as "no industries ranked".
 func printIndustryRank(ctx context.Context, fc *fundamental.FundamentalContext) error {
 	ind, err := parseIndustryRankIndicator(indicators)
 	if err != nil {
@@ -969,7 +973,10 @@ func printIndustryRank(ctx context.Context, fc *fundamental.FundamentalContext) 
 	}
 	// IndustryRank is market-wide rather than per symbol, so it takes a market
 	// code instead of a security symbol.
-	mkt := marketFromSymbol(symbol)
+	mkt, err := marketFromSymbol(symbol)
+	if err != nil {
+		return err
+	}
 
 	c, cancel := withTimeout(ctx)
 	defer cancel()
@@ -999,6 +1006,10 @@ func printIndustryRank(ctx context.Context, fc *fundamental.FundamentalContext) 
 func parseIndustryRankIndicator(s string) (fundamental.IndustryRankIndicator, error) {
 	// The SDK exposes these as string constants, so map the digits explicitly
 	// rather than casting: an out-of-range value would silently return nothing.
+	// Whitespace is trimmed first so a shell-quoted " 1 " is the code 1, but the
+	// comparison stays against the exact single digit, so "00", "1.0" and "1e0"
+	// are still rejected: only the documented code goes on the wire.
+	s = strings.TrimSpace(s)
 	for i := 0; i <= 7; i++ {
 		if s == strconv.Itoa(i) {
 			return fundamental.IndustryRankIndicator(s), nil
@@ -1008,6 +1019,12 @@ func parseIndustryRankIndicator(s string) (fundamental.IndustryRankIndicator, er
 		"(the SDK defines no names for these codes)", s)
 }
 
+// parseIndustryRankSort needs no sentinel, unlike the int-enum parsers in this
+// package: fundamental.IndustryRankSortType is a *string* type whose only members
+// are "0" and "1", so the zero value "" is already a value the API cannot be
+// sent. The error path returns that, and a caller that ignored the error would
+// send an empty sort_type rather than a valid-looking wrong one. Pinned by
+// TestParseIndustryRankSort_TheErrorValueIsNotASortType.
 func parseIndustryRankSort(s string) (fundamental.IndustryRankSortType, error) {
 	switch strings.ToLower(strings.TrimSpace(s)) {
 	case "0", "asc", "ascending":
@@ -1019,23 +1036,51 @@ func parseIndustryRankSort(s string) (fundamental.IndustryRankSortType, error) {
 }
 
 // marketFromSymbol derives the market code from a symbol's suffix, because
-// IndustryRank takes a market rather than a security.
-func marketFromSymbol(sym string) string {
+// IndustryRank and IndustryPeers take a market rather than a security.
+//
+// The accepted spellings are the SDK's own openapi.Market constants — the same
+// five every other command in this repo accepts for -market — so a suffix that
+// is not one of them is refused here rather than forwarded to a market-wide
+// endpoint, which would answer "no data" and read as an empty market. The
+// no-suffix case keeps its documented HK fallback.
+func marketFromSymbol(sym string) (string, error) {
+	if strings.LastIndex(sym, ".") < 0 {
+		return string(openapi.MarketHK), nil
+	}
+	suffix := symbolSuffix(sym)
+	switch openapi.Market(suffix) {
+	case openapi.MarketHK, openapi.MarketUS, openapi.MarketCN, openapi.MarketSG, openapi.MarketUK:
+		return suffix, nil
+	}
+	return "", fmt.Errorf("cannot read a market from -symbol %q: %q is not a market code, "+
+		"want HK, US, CN, SG or UK (a symbol with no suffix means HK)", sym, suffix)
+}
+
+// symbolSuffix returns the upper-cased, trimmed part after the last dot, or ""
+// when the symbol carries no suffix. It is the raw suffix, deliberately not
+// validated: macro-indicators uses it to look up a country code, where an
+// unrecognised one means "no filter" instead of a wrong request.
+func symbolSuffix(sym string) string {
 	i := strings.LastIndex(sym, ".")
 	if i < 0 {
-		return "HK"
+		return ""
 	}
-	return strings.ToUpper(sym[i+1:])
+	return strings.ToUpper(strings.TrimSpace(sym[i+1:]))
 }
 
 // printIndustryPeers -> FundamentalContext.IndustryPeers
 func printIndustryPeers(ctx context.Context, fc *fundamental.FundamentalContext) error {
+	mkt, err := marketFromSymbol(symbol)
+	if err != nil {
+		return err
+	}
+
 	c, cancel := withTimeout(ctx)
 	defer cancel()
 
 	cli.Section(fmt.Sprintf("Industry peer chain %s", symbol))
 	// industry_id is optional: passing "" lets the API infer it from counter_id.
-	r, err := fc.IndustryPeers(c, symbol, marketFromSymbol(symbol), "")
+	r, err := fc.IndustryPeers(c, symbol, mkt, "")
 	if err != nil {
 		return fmt.Errorf("industry peers for %s: %w", symbol, err)
 	}
@@ -1068,12 +1113,7 @@ func printPeerNode(n *fundamental.IndustryPeerNode, depth int) {
 // The SDK's country type is a bare string with no parser, so -symbol's
 // suffix doubles as the country filter when it is one of the known codes.
 func printMacroIndicators(ctx context.Context, fc *fundamental.FundamentalContext) error {
-	var country *fundamental.MacroeconomicCountry
-	if m := marketFromSymbol(symbol); m != "" {
-		if mc, ok := macroCountries[m]; ok {
-			country = &mc
-		}
-	}
+	country := macroCountry(symbol)
 	var keyword *string
 	if k := strings.TrimSpace(peers); k != "" {
 		keyword = &k
@@ -1101,7 +1141,8 @@ func printMacroIndicators(ctx context.Context, fc *fundamental.FundamentalContex
 	for _, m := range r.Data {
 		fmt.Printf("%-10s %-4s %-30s %-14s %-9s %s\n",
 			cli.OrDash(m.IndicatorCode), cli.OrDash(m.Country), cli.Truncate(cli.OrDash(m.Name), 30),
-			cli.Truncate(cli.OrDash(m.Periodicity), 14), parseImportance(m.Importance),
+			cli.Truncate(cli.OrDash(m.Periodicity), 14),
+			parseImportance(fundamental.MacroeconomicImportance(m.Importance)),
 			cli.Truncate(cli.OrDash(m.Describe), 50))
 	}
 	fmt.Println("\n(pass -action macro -indicator-code <CODE> for the series)")
@@ -1115,6 +1156,18 @@ var macroCountries = map[string]fundamental.MacroeconomicCountry{
 	"EU": fundamental.MacroeconomicCountryEU,
 	"JP": fundamental.MacroeconomicCountryJP,
 	"SG": fundamental.MacroeconomicCountrySG,
+}
+
+// macroCountry resolves -symbol's suffix to a macro country filter, or nil for
+// "no filter". It is deliberately tolerant where marketFromSymbol is strict: a
+// country is a different vocabulary from a market code (it has EU and JP, no UK)
+// and this one only narrows a list, so an unrecognised suffix such as the SH of
+// 000001.SH or a typo yields no filter instead of refusing the action.
+func macroCountry(sym string) *fundamental.MacroeconomicCountry {
+	if mc, ok := macroCountries[symbolSuffix(sym)]; ok {
+		return &mc
+	}
+	return nil
 }
 
 // printMacro -> FundamentalContext.Macroeconomic
@@ -1144,7 +1197,7 @@ func printMacro(ctx context.Context, fc *fundamental.FundamentalContext) error {
 	i := r.Info
 	fmt.Printf("%s  country=%s  periodicity=%s  importance=%s\n",
 		cli.OrDash(i.Name), cli.OrDash(i.Country), cli.OrDash(i.Periodicity),
-		parseImportance(i.Importance))
+		parseImportance(fundamental.MacroeconomicImportance(i.Importance)))
 	// The unit is stamped on every data point, not on the metadata header, so
 	// only show it when a point exists — an empty series has no unit to read.
 	unit := ""
@@ -1174,9 +1227,9 @@ func printMacro(ctx context.Context, fc *fundamental.FundamentalContext) error {
 // These are account statements, so they are personal to the account whose
 // token is configured — not market data.
 func printStatements(ctx context.Context, ac *asset.AssetContext) error {
-	ty := asset.StatementTypeDaily
-	if strings.ToLower(statementTy) == "monthly" {
-		ty = asset.StatementTypeMonthly
+	ty, err := parseStatementType(statementTy)
+	if err != nil {
+		return err
 	}
 
 	c, cancel := withTimeout(ctx)
@@ -1202,6 +1255,21 @@ func printStatements(ctx context.Context, ac *asset.AssetContext) error {
 	}
 	fmt.Println("\n(pass -action statement-url -file-key <FILE_KEY> for the download link)")
 	return nil
+}
+
+// parseStatementType maps -statement-type onto the SDK's statement type.
+//
+// This is the only place the daily/monthly vocabulary is written down: startup
+// validation calls it and printStatements calls it, so a padded "-statement-type
+// '  monthly  '" cannot be accepted by one and read as daily by the other.
+func parseStatementType(s string) (asset.StatementType, error) {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "daily":
+		return asset.StatementTypeDaily, nil
+	case "monthly":
+		return asset.StatementTypeMonthly, nil
+	}
+	return 0, fmt.Errorf("unknown -statement-type %q: want daily or monthly", s)
 }
 
 // printStatementURL -> AssetContext.StatementDownloadURL
@@ -1312,6 +1380,25 @@ func calendarWindow() (string, string, error) {
 	return start, end, nil
 }
 
+// calendarCategoryInvalid is what parseCalendarCategory returns alongside its
+// error.
+//
+// The zero value was the wrong choice here: calendar.CalendarCategory is a bare
+// int enum whose first member is CalendarCategoryReport, so `return 0, err`
+// handed back a *valid* category — and the documented default besides. A caller
+// that forgot to check the error would quietly list earnings reports instead of
+// erroring, and the heading it printed would name the category rather than the
+// word the user typed. printCalendar checks the error today; this is about the
+// next caller.
+//
+// -1 is outside the enum: the SDK declares eight members with iota and none
+// negative (calendar/types.go, v0.25.2), so the valid range is 0..7.
+// TestParseCalendarCategory_AgreesWithTheSDKWireStrings already pins that
+// numbering, and TestParseCalendarCategory_TheErrorValueIsNotACategory asserts
+// the membership property itself, so an SDK that ever added a negative member
+// would fail there rather than quietly making this sentinel valid.
+const calendarCategoryInvalid calendar.CalendarCategory = -1
+
 func parseCalendarCategory(s string) (calendar.CalendarCategory, error) {
 	switch strings.ToLower(strings.TrimSpace(s)) {
 	case "report":
@@ -1331,7 +1418,7 @@ func parseCalendarCategory(s string) (calendar.CalendarCategory, error) {
 	case "merge":
 		return calendar.CalendarCategoryMerge, nil
 	}
-	return 0, fmt.Errorf("unknown -calendar-category %q: want report, dividend, split, ipo, "+
+	return calendarCategoryInvalid, fmt.Errorf("unknown -calendar-category %q: want report, dividend, split, ipo, "+
 		"macrodata, closed, meeting or merge", s)
 }
 
