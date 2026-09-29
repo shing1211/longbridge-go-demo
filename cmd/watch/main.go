@@ -2,7 +2,9 @@
 // ticks, order-book depth and broker queues until interrupted.
 //
 // It shuts down gracefully on SIGINT/SIGTERM: it unsubscribes, closes the quote
-// context, and exits 0. It is read-only and places no orders.
+// context, and exits 0. It is read-only and places no orders — including under
+// -orders, which reads the account's order push feed without ever submitting,
+// replacing or cancelling anything.
 package main
 
 import (
@@ -52,6 +54,13 @@ func main() {
 	cfg := u.Load()
 	timeout = appcfg.Timeout()
 	fmt.Fprintf(os.Stderr, "[config] %s\n", cfg)
+	// SAFETY: read-only binary. If the order gate were open, stop. The -orders
+	// path uses a TradeContext, but only to Subscribe/Unsubscribe a push feed:
+	// it never calls SubmitOrder, ReplaceOrder or CancelOrder, and a
+	// subscription changes nothing server-side, so it is still a reader.
+	if err := cfg.GuardWrite("run the watch streamer"); err == nil {
+		cli.Fail(fmt.Errorf("internal invariant violated: watch is read-only but the order gate is open"))
+	}
 
 	// The order stream is a different websocket on a different context, and it
 	// needs no symbols, so it takes a wholly separate path rather than being
