@@ -6,29 +6,72 @@ The point of a demonstration built on someone else's client library is to have u
 
 ## Requirements
 
-### Requirement: Every exported context method is referenced from command code
+### Requirement: Every exported method on an exported type is referenced or justified
 
-Every exported method of every context type the interface library exposes SHALL be referenced from code under the command directory. Twelve context types are in scope and all 153 of their exported methods are referenced.
+Every exported method declared on an exported type the interface library exposes SHALL either be referenced from code under the command directory or carry exactly one allow-list entry. The check SHALL span the whole exported surface, not only the command-context types, and the scanned total SHALL be 206 type-and-method pairs.
 
 #### Scenario: A method with no call site fails the check
 
-- **WHEN** an exported context method has no reference anywhere under the command directory
-- **THEN** the check fails and names the uncovered method
+- **WHEN** an exported method has no reference anywhere under the command directory and no allow-list entry
+- **THEN** the check fails and names the method as neither referenced nor allow-listed
 
-#### Scenario: The check spans every context type
+#### Scenario: The check spans every exported type
 
 - **WHEN** the check enumerates the exported methods
-- **THEN** it enumerates methods of all twelve context types, including the one whose methods are declared on a differently named receiver than the rest
+- **THEN** it enumerates methods of every exported type, including the twelve command-context types, the bare status and mode enums, the configuration and token types, the error type, and the request types whose only method returns their own fields
 
 #### Scenario: A new context method is detected
 
-- **WHEN** the interface library gains an exported context method
-- **THEN** the check fails until the new method is referenced from command code
+- **WHEN** the interface library gains an exported method on an exported type
+- **THEN** the check fails until the new method is referenced from command code or allow-listed with a reason
+
+#### Scenario: A method that gains a call site fails the check
+
+- **WHEN** an allow-listed method gains a reference from command code
+- **THEN** the check fails and reports the method as now covered so that its allow-list entry is deleted
+
+#### Scenario: The allow-list is an exact set
+
+- **WHEN** an allow-list entry names a method the check did not scan, or carries a reason word outside the fixed vocabulary
+- **THEN** the check fails and names the offending entry, so the list cannot rot into a standing exemption
 
 #### Scenario: The current state is complete
 
 - **WHEN** the check runs against the interface library version this project depends on
-- **THEN** it reports all 153 methods covered and none uncovered
+- **THEN** it reports 176 of the 206 methods referenced from command code, 30 justified on the allow-list, and none in neither state
+
+### Requirement: The scan is receiver-name-agnostic and the total is pinned
+
+The check SHALL identify a method without depending on the identifier a receiver happens to be named, and SHALL accept a method declared on a value as readily as on a pointer. The scanned total SHALL be compared against a pinned count of 206 and the check SHALL fail when the two differ, so a pattern that stops matching a class of method fails instead of quietly shrinking the denominator.
+
+#### Scenario: A receiver named something unexpected is still counted
+
+- **WHEN** a method is declared on a receiver whose identifier is not the one most methods use, including a receiver that is left unnamed
+- **THEN** it still appears in the scanned total
+
+#### Scenario: A value-receiver method is still counted
+
+- **WHEN** a method is declared on a value rather than a pointer
+- **THEN** it still appears in the scanned total
+
+#### Scenario: A pattern that counts too few methods fails
+
+- **WHEN** the check scans a total other than 206
+- **THEN** it fails and reports the expected and the scanned total, naming a moved library version or a regressed pattern as the two possible causes
+
+### Requirement: An allow-list entry states one reason from a fixed vocabulary
+
+Every allow-list entry SHALL name exactly one reason, and the reason SHALL be one of `internal`, `unimportable` or `not-used`. The current 30 entries SHALL consist of 21 `internal`, 1 `unimportable` and 8 `not-used`.
+
+#### Scenario: A reason word outside the vocabulary is refused
+
+- **WHEN** an allow-list entry carries a reason word that is not `internal`, `unimportable` or `not-used`
+- **THEN** the check fails and prints the three accepted reason words
+
+#### Scenario: The three reasons stay distinct
+
+- **WHEN** an allow-list entry is justified
+- **THEN** its reason distinguishes one that a higher-level command already reaches indirectly, one that cannot be imported at all by this project, and one that is importable and user-facing but deliberately not reached
 
 ### Requirement: The coverage check is static only
 
@@ -48,6 +91,35 @@ The check SHALL be a static reference search and SHALL make no network request. 
 
 - **WHEN** an artifact states the coverage figure
 - **THEN** it does not present that figure as evidence that the corresponding API surface works
+
+#### Scenario: A pass is not described as receiver-accurate
+
+- **WHEN** an artifact reports the check as passing
+- **THEN** it describes the result as no method being both unreferenced and unjustified, and does not claim each method was called on its own type
+
+### Requirement: The status section prints the trade-status predicates
+
+The market-status section of the market-data command SHALL print, for each market it reports, a block of trade-status predicate results in addition to the status table, and that block SHALL be derived only from the status value the response carried. A market for which the response carried no status SHALL be printed as an absent status with no predicate result.
+
+#### Scenario: The predicate block lists the predicates for a reported status
+
+- **WHEN** the command prints a market whose status the response supplied
+- **THEN** it prints the status code and name, a separate block for the delayed status, and one line per trade-status predicate grouped by the question each predicate answers
+
+#### Scenario: An absent status prints no predicate
+
+- **WHEN** the response supplies no status for a market
+- **THEN** the command prints that no status was supplied together with the code, and prints no predicate value for that market
+
+#### Scenario: The predicates are verified without a request
+
+- **WHEN** the test suite asserts what each trade-status predicate returns
+- **THEN** it does so from statuses built locally, with no client, no fixture and no network request, and without any observed market data
+
+#### Scenario: The predicate rendering is not presented as an observed response
+
+- **WHEN** an artifact shows the predicate block
+- **THEN** it identifies the values as computed from a status value rather than as a response observed from the brokerage
 
 ### Requirement: The coverage check is a build target
 

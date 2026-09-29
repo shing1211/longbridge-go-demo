@@ -7,12 +7,13 @@ at **v0.25.2**.
 Fifteen commands, one shared config loader, and a hard rule that no order can be
 sent unless you say so three different ways.
 
-**SDK coverage: every exported method on all twelve context types is exercised
-somewhere in `cmd/` — 153 of 153**, and `make coverage-check` fails the build if
-that stops being true. The normative statement is
+**SDK coverage: 176 of the 206 exported methods on every exported type the SDK
+exposes are exercised somewhere in `cmd/`; the other 30 are on an allow-list that
+gives each one a written reason.** `make coverage-check` fails the build if that
+stops being true, in either direction. The normative statement is
 [`openspec/specs/sdk-coverage/`](openspec/specs/sdk-coverage/spec.md); see
-[SDK coverage](#sdk-coverage) for the command that verifies it, the per-context
-counts, and the caveat that it is a static check.
+[SDK coverage](#sdk-coverage) for the command that verifies it, the per-type
+counts, the three reason words, and the caveat that it is a static check.
 
 > **Status: not yet tested against the live API.** See
 > [Honest status](#honest-status). Everything below was verified by building,
@@ -736,7 +737,7 @@ go run ./cmd/market -sections trade-stats -trade-stats-symbol 700.HK
 
 | Section | SDK method | Notes |
 | --- | --- | --- |
-| `status` | `MarketStatus` | Per-market status, delayed status, sub-status. |
+| `status` | `MarketStatus` | Per-market status, delayed status, sub-status, then a `Predicates` block. |
 | `calendar` | `TradingDays` (quote ctx) | Full and half trading days. |
 | `timeline` | `Intraday` (quote ctx) | Last `-lines` intraday points. |
 | `ahpremium` | `AhPremium` | A/H premium klines for a dual-listed name. |
@@ -778,6 +779,96 @@ go run ./cmd/market -sections trade-stats -trade-stats-symbol 700.HK
 Two sections need an input the API cannot guess, and the command fails at
 startup with a clear message rather than making a doomed request:
 `-broker-id` for `broker-holding-daily` and `-rank-key` for `rank-list`.
+
+#### The `status` section now prints the predicates too
+
+`status` used to stop at the table: one row per market with the code, the label,
+`IsTrading`, the delayed equivalents and the sub-statuses. It now follows that
+table with a **`Predicates`** block — one block per market, split into a
+`status` block and a separate `delay status` block, each headed with the raw
+code and the status's full name, and each listing the eleven `TradeStatus`
+predicates plus `Normalize`:
+
+```console
+Predicates
+  US   status: code 201 (Pre-Market)
+    session
+      IsTrading       false  regular trading hours
+      AllowTrading    false  orders accepted here
+    us hours
+      IsUSMarket      true   code is in the US 200s
+      IsUSPrePost     true   = IsUSPreMarket || IsUSPostMarket
+      IsUSPreMarket   true   US extended, before the open
+      IsUSPostMarket  false  US extended, after the close
+      IsUSNight       false  US overnight session
+    closed
+      IsClosing       false  session is over
+      IsUSClosing     false  US session is over
+    other
+      IsDark          false  dark pool, not a session
+      IsSpecial       false  halt, suspension, listing or out-of-range code
+      Normalize       201    already a display status
+  US   delay status: code 202 (Trading)
+    session
+      IsTrading       true   regular trading hours
+      …
+```
+
+**The block above is the renderer exercised offline, not a live transcript.** The
+layout was produced by calling the same rendering function the command calls,
+from a test, with hand-built status values. This project has never held a
+working access token; see [Honest status](#honest-status). What the predicates
+*answer* is pinned against the SDK's own constants in the test suite, with no
+client, no fixtures and no network — they are pure functions of a status value,
+which is exactly why they can be. Nothing here has been compared against what a
+market actually reported.
+
+Four decisions in that block are worth stating, because the overlaps look like
+mistakes otherwise:
+
+- **`IsUSPrePost` is not independent.** The SDK defines it as exactly
+  `IsUSPreMarket || IsUSPostMarket`, so it is printed for the *shape* of the
+  answer ("neither regular nor closed") and asserted as that identity across the
+  whole code range. `US overnight` is the row that would look like a bug: it is
+  extended-hours and open, yet `IsUSPrePost` is `false`, because the SDK defines
+  overnight as neither pre nor post.
+- **`IsUSClosing` is `IsClosing` restricted to the US codes**, so it can never
+  be true while `IsClosing` is false. It is still printed: it answers "is the
+  *US* session closed", which `IsClosing` alone does not. `half-day close` is
+  the state that separates them — closed, but not a US close.
+- **`IsDark` is a venue, not a session.** A dark status is simultaneously *not*
+  `IsTrading` and *not* `IsClosing`, so `false` and `IsDark true` is a real
+  combination, not a contradiction.
+- **`IsSpecial` is a code-range test, not the complement of the rest.** A US
+  halted market is both `IsUSMarket` and `IsSpecial`.
+
+**An absent status prints a dash and no predicates.** `TradeStatus` is a bare
+`int32`, so "the API supplied no status" and "the API supplied this one and it
+says the market is shut" are not distinguishable by type: the SDK decodes a
+missing JSON field as `0` and an unrecognised code as `-1`, and `Label()` is
+empty for both. Those two codes print
+`status: - (no status supplied, code 0)` and nothing else. Printing the
+predicates there would be worse than a row of falses, because `IsSpecial` is
+true for every code below 100 — an absent status would render as "halted,
+suspended, delisted or unlisted". On a section whose entire subject is whether
+it is safe to trade, inventing an answer for a market we know nothing about is
+the one failure worth going out of the way to avoid.
+
+`IsTrading` is printed even though the table above already has a `TRADING`
+column, deliberately: the table has one column for two different statuses (live
+and delay), and a block that omitted the answer would be the block a reader
+trusts least.
+
+`String()` is deliberately **not** printed. Its body is `return s.Name()`, so
+printing it would print `Name()` under a second name; the full name is already
+in the block header, where it also fills the gap `Label()` leaves for the codes
+it declines to label (dark, the auctions, breaks) — which is why those rows show
+`-` in the table above. Per the notes in the source, the per-predicate
+descriptions deliberately do not restate the SDK's code lists: that would be a
+second copy of the SDK's status table to go stale silently. The real code is
+printed next to every block, and the tests pin each predicate against the SDK's
+own constants, so a predicate that changed meaning fails the build rather than
+quietly printing a wrong note.
 
 `calendar` and `timeline` live on the quote context, everything else on the
 market context. The quote context opens a websocket, so `cmd/market` creates it
@@ -1982,55 +2073,127 @@ error rather than a confusing SDK one.
 
 ## SDK coverage
 
-**All 153 exported context methods across all twelve context types are covered:
-153 of 153.** `cmd/screener` closed the last gap, `ScreenerContext`. The
+**The check now scans the whole exported surface: 206 exported methods on all
+exported types, of which 176 are referenced from `cmd/` and 30 are
+allow-listed with a written reason. There are no unreferenced-and-unjustified
+methods.** The previous claim — 153 of 153 context methods — was true of the
+context types and silently narrower than the surface it was standing in for. The
 normative statement of the requirement — and of what the check is *not* allowed
 to be read as proving — is
 [`openspec/specs/sdk-coverage/`](openspec/specs/sdk-coverage/spec.md). This
 section is the evidence.
 
 The claim is enforced, not just asserted: `make coverage-check` re-derives the
-list from the module cache and exits non-zero if any method is unreferenced, and
-`make verify` runs it.
+list from the module cache and exits non-zero if any method is both unreferenced
+and unjustified, and `make verify` runs it. This is the target's actual output,
+quoted verbatim:
 
 ```console
 $ make coverage-check
-sdk coverage: 153/153 context methods covered
+sdk coverage: 176/206 exported methods referenced from cmd/
+sdk allow-list: 30 of 206 methods justified, by reason:
+  internal     21
+  unimportable 1
+  not-used     8
 ```
 
-You can also check it yourself without trusting either. **One command covers
-every context**, and it is deliberately receiver-agnostic — note the `[a-z]+` in
-the pattern, not `[cd]`. The receiver letter is not uniform across the SDK:
-`MarketContext`'s methods are declared on `m *MarketContext` while every other
-context uses `c *XContext` (and DCA uses `d`). A pattern written as
-`\(c \*` silently misses all 12 `MarketContext` methods, which is why the older
-version of this section was quietly incomplete.
+You can also check it yourself without trusting either. **One pattern covers the
+whole exported surface**, and it is deliberately receiver-agnostic — note
+`[a-zA-Z_][A-Za-z0-9_]*` in the pattern, not `[cd]`. The receiver identifier is
+not uniform across the SDK: `MarketContext`'s methods are declared on
+`m *MarketContext` while most contexts use `c *XContext` (and DCA uses `d`), and
+`internal/signer/signer.go` declares `func (_ *Signer) String()` with a blank
+receiver. A pattern written as `\(c \*` silently misses all 12
+`MarketContext` methods, which is why an older version of this section was
+quietly incomplete; `[a-z]+` silently misses the blank receiver.
+
+This is the pattern the target actually uses — note all four parts of it, not
+just the receiver class. It matches **any** receiver identifier, **value or
+pointer**, on **any exported** type, for **any exported** method name. The
+context-only pattern this section used to print,
+`^func \([a-z]+ \*[A-Za-z]+Context\)`, is strictly narrower and silently
+under-counts; the three parts that matter are called out under
+[What the pattern is not allowed to lose](#what-the-pattern-is-not-allowed-to-lose).
 
 ```console
 $ BASE=$(go env GOMODCACHE)/github.com/longbridge/openapi-go@v0.25.2
-$ grep -rhoE '^func \([a-z]+ \*[A-Za-z]+Context\) [A-Z][A-Za-z0-9]*' \
-    "$BASE" --include=*.go \
-  | sed -E 's/^func \([a-z]+ \*([A-Za-z]+)Context\) ([A-Za-z0-9]*)/\1 \2/' | sort -u \
-  | tee /tmp/ctx.txt | wc -l
-153
-$ while read -r ctx m; do grep -rqE "\.$m\(" cmd/ || echo "UNCOVERED: $ctx $m"; done < /tmp/ctx.txt
-$ # (no output = fully covered)
-$ cut -d' ' -f1 /tmp/ctx.txt | uniq -c
-      4 Alert
-      2 Asset
-      1 Calendar
-      7 Content
-     11 DCA
-     32 Fundamental
-     12 Market
-      5 Portfolio
-     47 Quote
-      5 Screener
-      8 Sharelist
-     19 Trade
+$ grep -rhoE '^func \([a-zA-Z_][A-Za-z0-9_]* \*?[A-Z][A-Za-z0-9_]*\) [A-Z][A-Za-z0-9_]*' \
+    "$BASE" --include='*.go' --exclude='*_test.go' \
+  | sed -E 's/^func \([a-zA-Z_][A-Za-z0-9_]* (\*?)([A-Z][A-Za-z0-9_]*)\) ([A-Za-z0-9_]*)/\2 \3/' \
+  | LC_ALL=C sort -u | tee /tmp/list.txt | wc -l
+206
+$ while read -r typ m; do grep -rqE "\.$m\(" cmd/ || echo "NOT REFERENCED: $typ $m"; done < /tmp/list.txt
+$ # (30 lines, each of which is on the allow-list below)
+$ cut -d' ' -f1 /tmp/list.txt | uniq -c
+      4 AlertContext
+      1 ApiError
+      2 AssetContext
+      1 CalendarCategory
+      1 CalendarContext
+      7 Client
+      3 Config
+      7 ContentContext
+     11 DCAContext
+      1 DCAFrequency
+      1 DCAStatus
+      1 EnvConfig
+     32 FundamentalContext
+      1 GetAccountBalance
+      1 GetCashFlow
+      1 GetEstimateMaxPurchaseQuantity
+      1 GetFundPositions
+      1 GetHistoryExecutions
+      1 GetHistoryOrders
+      1 GetStatementDownloadURL
+      1 GetStatementList
+      1 GetStockPositions
+      1 GetTodayExecutions
+      1 GetTodayOrders
+     12 MarketContext
+      5 OAuth
+      1 PinnedMode
+      5 PortfolioContext
+     47 QuoteContext
+      5 ScreenerContext
+      8 SharelistContext
+      2 Signer
+      1 TOMLConfig
+     19 TradeContext
+     17 TradeStatus
+      1 YAMLConfig
 ```
 
-For reference, here are the per-context greps the older version of this section
+That is the *whole* exported surface: **206** `Type Method` pairs, not just the
+153 that live on context types. The 53 the context-only pattern never saw are
+`Client` (7), `Config` (3), `OAuth` (5), `Signer` (2), `TradeStatus` (17),
+`DCAStatus` (1), `DCAFrequency` (1), `PinnedMode` (1), `CalendarCategory` (1),
+`ApiError` (1), the three `GetConfig` methods on `EnvConfig` / `TOMLConfig` /
+`YAMLConfig`, and the eleven request `Values()`.
+
+### What the pattern is not allowed to lose
+
+Three parts of that pattern are load-bearing, and breaking **any one of them
+does not fail loudly** — it quietly stops counting a class of method and the
+target goes green on a smaller denominator.
+
+- `\*?` — 20 of the 206 are **value** receivers, including every
+  `TradeStatus` predicate. `\*` skips exactly the class most worth counting.
+- `[a-zA-Z_]` — `internal/signer/signer.go` declares `func (_ *Signer) String()`.
+  `[a-z]+` misses the only blank receiver in the module.
+- `[A-Z]` on the **type** — this excludes `core` (35 methods) and `store` (8),
+  the unexported websocket internals the contexts embed. They are unreachable
+  from outside their own package, so demanding a call site for them is
+  unsatisfiable by construction. Do not drop it.
+
+The count is pinned at **206** in the Makefile, and that pin is the one thing
+here that catches a broken *pattern* rather than a broken claim. Every set
+assertion can pass against a list that is too small: all 20 value-receiver
+methods happen to be covered, so `\*` in place of `\*?` drops them and still
+goes green. The count is what notices. It moves when `go.mod` bumps the SDK; to
+find out by how much, run the `go doc` oracle the Makefile documents above the
+target, which agrees with the grep byte for byte today.
+
+For reference, here are the per-context greps an older version of this section
 used, corrected to match receiver letters. They are subsumed by the loop above
 but are kept because they read more clearly when you only care about one area.
 
@@ -2068,11 +2231,87 @@ every method was *exercised against a live account*. No command in this repo
 has been run with a working access token, so no successful response has ever
 been observed. See [Honest status](#honest-status).
 
-The per-context picture — the counts, and **which command file each group lives
-in**, which is the part the spec cannot hold for you:
+**Read a green run as "no unreferenced method is left unjustified", not "every
+method is called on its own type."** The matcher is by method **name**, not by
+receiver type, so a call of the same name on an unrelated type counts as
+coverage. These are verified false positives in the current tree:
+
+| Method | Why it counts as covered |
+| --- | --- |
+| `Client Delete` | `AlertContext.Delete`, `SharelistContext.Delete` |
+| `ApiError Error` | any `err.Error()`; `ApiError` appears nowhere in `cmd/` |
+| `TradeStatus String` | `decimal.Decimal.String`, `bytes.Buffer.String` |
+| `Signer String` | the same `.String(` match; unimportable anyway |
+| `CalendarCategory String` | `bytes.Buffer.String` in `cmd/fundamentals`; its only genuine call site is a `_test.go` |
+
+`TradeStatus String` is the one to be careful about: it is counted, and
+`cmd/market` deliberately does **not** print it, because its body is
+`return s.Name()`. A type-accurate check needs a parser, not `grep`. The
+reference scan does include `cmd/**/*_test.go`, so a `_test.go`-only call site
+counts.
+
+### The allow-list, and its three reason words
+
+Thirty methods are referenced from nowhere in `cmd/`, and each carries one line
+`Type Method:reason` in the Makefile. The check is an **exact set** assertion,
+which is why it is worth saying what that means — it fails in **both**
+directions:
+
+- a **new** uncovered method is not on the list → fail, naming the method;
+- an allow-listed method that **gains** a call site → fail, `now covered —
+  delete from the allow-list above`. A stale justification is an error, not a
+  no-op, so the list cannot rot into a permanent amnesty;
+- an allow-list line that **matches no method** in the scan → fail (typo,
+  rename, or a new SDK version);
+- a line whose reason word is not one of the three → fail, printing the
+  accepted words.
+
+The three reason words, as the Makefile defines them:
+
+- **`internal`** — the SDK calls it itself as part of a higher-level operation
+  we do make. Every context method routes through `http.Client.Call`; the
+  eleven `Values()` are called by the context method that accepts them;
+  `Config.Logger` by the two websocket contexts; the three `GetConfig` by
+  `config.New`. Reached, just not by us. **21** entries.
+- **`unimportable`** — it lives in the SDK's `internal/` tree. Go's internal
+  rule means this module cannot import it at all, so a call site is
+  unsatisfiable by construction rather than by choice. It has its own word so
+  nobody "fixes" it by trying. **1** entry (`Signer Sign`).
+- **`not-used`** — importable and user-facing, deliberately not reached. Kept
+  distinct from `internal` on purpose: collapsing the two would lose the fact
+  that a user *could* call it. **8** entries.
+
+Per type, the numbers behind the three-line summary:
+
+| Type | Methods | Referenced | Allow-listed |
+| --- | --- | --- | --- |
+| `QuoteContext` | 47 | 47 | 0 |
+| `FundamentalContext` | 32 | 32 | 0 |
+| `TradeContext` | 19 | 19 | 0 |
+| `TradeStatus` | 17 | 16 | 1 |
+| `MarketContext` | 12 | 12 | 0 |
+| `DCAContext` | 11 | 11 | 0 |
+| `SharelistContext` | 8 | 8 | 0 |
+| `Client` | 7 | 1 | 6 |
+| `ContentContext` | 7 | 7 | 0 |
+| `OAuth` | 5 | 0 | 5 |
+| `ScreenerContext` | 5 | 5 | 0 |
+| `PortfolioContext` | 5 | 5 | 0 |
+| `AlertContext` | 4 | 4 | 0 |
+| `Config` | 3 | 0 | 3 |
+| `Signer` | 2 | 1 | 1 |
+| `AssetContext` | 2 | 2 | 0 |
+| `CalendarContext`, `DCAStatus`, `DCAFrequency`, `PinnedMode`, `CalendarCategory`, `ApiError` | 1 each | 1 each | 0 |
+| `EnvConfig`, `TOMLConfig`, `YAMLConfig` (the `GetConfig` methods) | 3 | 0 | 3 |
+| the eleven `Get*` request types (`Values`) | 11 | 0 | 11 |
+| **Total** | **206** | **176** | **30** |
+
+The per-context picture — **which command file each group lives in**, which is
+the part the spec cannot hold for you:
 
 | Area | Context type | Methods | Covered | Lives in |
 | --- | --- | --- | --- | --- |
+| Trade status | `TradeStatus` (predicates and helpers) | 17 | 16 | `cmd/market`, in the `status` section's `Predicates` block. `UnmarshalJSON` is allow-listed `not-used`. |
 | Market data | `QuoteContext` | 47 | 47 | `cmd/quote`, `cmd/watch`, `cmd/market` (2 sections), `cmd/executions`, `cmd/reference`, `cmd/warrant`, `cmd/watchlist -action list`. |
 | Fundamentals | `FundamentalContext` | 32 | 32 | `cmd/fundamentals`, one `-action` per method. |
 | Orders & account | `TradeContext` | 19 | 19 | `cmd/trade`, plus `cmd/executions` and `cmd/watch -orders`. |
@@ -2085,17 +2324,18 @@ in**, which is the part the spec cannot hold for you:
 | Price alerts | `AlertContext` | 4 | 4 | `cmd/alert`; `List` is a read, 3 writes behind the alert gate. |
 | Assets | `AssetContext` | 2 | 2 | `cmd/fundamentals`. |
 | Calendar | `CalendarContext` | 1 | 1 | `cmd/fundamentals`. `cmd/market` also has `TradingDays` from `QuoteContext`. |
-| **Total** | **12 context types** | **153** | **153** | |
+| **Context subtotal** | **12 context types** | **153** | **153** | |
+| Everything else | the 25 non-context exported types | 53 | 23 | Spread across `cmd/market`, `cmd/dca`, `cmd/fundamentals`, `cmd/content`, and the SDK's own internals; 30 allow-listed. |
 
-There is no longer any omission to explain, so the rule that used to govern
-them — "this demo only calls a mutating method when that method sits behind its
-own complete gate" — is now a description of *every* write in the repo rather
-than a justification for a gap. There are **24** guarded write methods across
-the six gates (4 order, 4 watchlist, 5 sharelist, 2 content, 6 DCA, 3 alert) and
-**0** uncovered methods. The last omission, `ScreenerContext`, was never a
-safety decision: all five screener methods are reads, and one of them
-(`Search`) is a `POST` that queries and mutates nothing. It is simply the newest
-addition.
+There is no longer any context-method omission to explain, so the rule that used
+to govern them — "this demo only calls a mutating method when that method sits
+behind its own complete gate" — is now a description of *every* write in the repo
+rather than a justification for a gap. There are **24** guarded write methods
+across the six gates (4 order, 4 watchlist, 5 sharelist, 2 content, 6 DCA, 3
+alert) and **0** unreferenced context methods. The last context omission,
+`ScreenerContext`, was never a safety decision: all five screener methods are
+reads, and one of them (`Search`) is a `POST` that queries and mutates nothing.
+It is simply the newest addition.
 
 The earlier version of this section said `AlertContext` was uncovered because
 "all writes … would need its own third guard", and that `ScreenerContext` was
@@ -2103,6 +2343,15 @@ uncovered. Both were wrong. `AlertContext` has a gate — `config.AlertGuard`, a
 `config.WriteGuard`, used by `cmd/alert` — and `AlertContext.List` is a plain
 `GET /v1/notify/reminders` read, not a write at all. `cmd/screener` now covers
 all five screener methods.
+
+And the version before this one reported **153 of 153** as the headline. That
+number was true and still misleading: it was the count of *context* methods, and
+it stood in for "the SDK is covered". It was not. Widening the scan to every
+exported type surfaced 53 methods the context pattern had never counted, 23 of
+which turned out to be referenced from `cmd/` and 30 of which needed a written
+reason. Nothing regressed between those two runs — the earlier claim was
+narrower than the surface it claimed to cover, and that is the failure mode the
+pinned count now guards against.
 
 ---
 
@@ -2119,8 +2368,8 @@ What *was* verified by execution:
 - `go build ./...` and `go vet ./...` both exit 0.
 - `make verify` is green: `fmt-check`, `vet`, `test` (`go test -race ./...`),
   `build`, and `coverage-check`.
-- The test suite passes: **456** test functions across **16** packages,
-  **2 608** passing cases including subtests, one helper-process test skipped.
+- The test suite passes: **469** test functions across **16** packages,
+  **2 650** passing cases including subtests, one helper-process test skipped.
   See [Development](#development).
 - The suite is green under `-race`, `-count=2` and `-shuffle=on`, under a
   deliberately hostile `env -i` environment, with poisoned
@@ -2183,10 +2432,25 @@ What *was* verified by execution:
 - `-config ./config.yml` and `-config ./config.toml` both fail with the
   explicit "this demo reads YAML only" error and exit **1**, even when the
   environment has already supplied all three credentials.
-- The static coverage check above finds no uncovered method — and, unlike the
-  previous version of this claim, it now actually examines **all twelve**
-  context types. The old snippets used `\(c \*` and so silently skipped all 12
-  `MarketContext` methods; the check is receiver-agnostic now.
+- The static coverage check above now scans the **whole** exported surface, not
+  just the context types: **206** exported methods on every exported type,
+  **176** referenced from `cmd/`, **30** allow-listed with a reason, and none
+  left in the gap between the two. Getting there meant fixing the pattern twice
+  over — the old snippets used `\(c \*` and silently skipped all 12
+  `MarketContext` methods, and the next version's `\*` would have silently
+  skipped all 20 value-receiver methods, every `TradeStatus` predicate among
+  them. Both fail green, which is why the total is pinned at 206.
+- `cmd/market -sections status` now also prints a **`Predicates`** block: for
+  each market, the eleven `TradeStatus` predicates plus `Normalize`, grouped by
+  the question each answers (`session`, `us hours`, `closed`, `other`), with a
+  per-market `status` block and a separate `delay status` block. Sixteen of the
+  seventeen `TradeStatus` methods are now referenced; `UnmarshalJSON` is
+  allow-listed `not-used`. This is verified **entirely offline** — the
+  predicates are pure functions of a status value, so the tests build statuses
+  by hand and assert each predicate for every state the SDK can produce, with no
+  client, no fixtures and no network. It has **not** been compared against what
+  a market actually reported. See
+  [Honest status](#honest-status).
 
 **A 401 is a real answer, not a successful one.** The rule this sentence states
 is normative in
@@ -2372,7 +2636,7 @@ The `Makefile` has grown three targets since this section was last written, and
 | Target | What it does |
 | --- | --- |
 | `make test` | `go test -race ./...` |
-| `make coverage-check` | Re-derives the SDK context-method list from the module cache and **fails** if any method is unreferenced from `cmd/`. Prints `sdk coverage: 153/153 context methods covered`. |
+| `make coverage-check` | Re-derives the list of every exported method on every exported type from the module cache, and **fails** if one is neither referenced from `cmd/` nor allow-listed with a reason — in either direction. Prints `sdk coverage: 176/206 exported methods referenced from cmd/` plus the per-reason allow-list breakdown. |
 | `make verify` | `fmt-check vet test build coverage-check` — the whole CI set. |
 
 The rest of the targets are unchanged: `all` (`fmt vet build`), `build`, `fmt`,
@@ -2389,7 +2653,11 @@ ok  	github.com/shing1211/longbridge-go-demo/test	0.087s
   build quote
   …
   build screener
-sdk coverage: 153/153 context methods covered
+sdk coverage: 176/206 exported methods referenced from cmd/
+sdk allow-list: 30 of 206 methods justified, by reason:
+  internal     21
+  unimportable 1
+  not-used     8
 ```
 
 ### The numbers
@@ -2401,7 +2669,7 @@ sdk coverage: 153/153 context methods covered
 | `internal/cli` | 43 | 160 (159 pass + 1 skip) | **98.7%** |
 | `cmd/warrant` | 36 | 254 | 55.9% |
 | `cmd/dca` | 35 | 174 | 48.8% |
-| `cmd/market` | 27 | 150 | 21.1% |
+| `cmd/market` | 40 | 192 | 25.1% |
 | `cmd/sharelist` | 27 | 120 | 36.1% |
 | `cmd/alert` | 25 | 121 | 44.2% |
 | `cmd/trade` | 23 | 129 | 35.7% |
@@ -2412,7 +2680,7 @@ sdk coverage: 153/153 context methods covered
 | `cmd/reference` | 16 | 100 | 8.6% |
 | `cmd/quote` | 8 | 60 | 12.0% |
 | `test` | 3 | 18 | *no statements* |
-| **Total** | **456** | **2 609** (2 608 pass + 1 skip) | — |
+| **Total** | **469** | **2 651** (2 650 pass + 1 skip) | — |
 
 Sorted by test functions. `cmd/portfolio` and `cmd/watch` have no test file and
 so appear in no row; `go test -cover ./...` reports them at 0.0%. The `test`
@@ -2425,11 +2693,11 @@ meaningful when re-executed by its parent. To reproduce the totals:
 
 ```console
 $ go test -count=1 -v ./... 2>&1 | grep -cE '^\s*--- PASS'
-2608
+2650
 $ go test -count=1 -v ./... 2>&1 | grep -cE '^\s*--- SKIP'
 1
 $ grep -rhE '^func Test' --include='*_test.go' . | wc -l
-456
+469
 $ go test -cover ./... | wc -l
 18
 $ make build && ls bin | wc -l
@@ -2721,7 +2989,7 @@ $ openspec validate --specs --strict
 Totals: 7 passed, 0 failed (7 items)
 ```
 
-Seven capabilities, 27 requirements:
+Seven capabilities, 31 requirements:
 
 | Spec | What it owns |
 | --- | --- |
@@ -2730,8 +2998,8 @@ Seven capabilities, 27 requirements:
 | `read-only-invariant` | the eight read-only binaries, the assertion each one carries, and exit 1 for a violation |
 | `config-loading` | credential precedence, which files are candidates, and which user errors are *not* missing-credential errors |
 | `secret-handling` | what the app key, app secret and access token render as, and the fixed-width mask |
-| `sdk-coverage` | that every exported SDK context method is referenced, and that the check proves only reference |
-| `verification-honesty` | the rule that a rejected request proves a request was built, signed, delivered and refused — and nothing more |
+| `sdk-coverage` | that every exported method on every exported type is referenced or justified, that the scan cannot quietly shrink, and that the check proves only reference |
+| `verification-honesty` | the rule that a rejected request proves a request was built, signed, delivered and refused — and nothing more, plus the rule that a locally computed output is not observed data |
 
 Read a spec when you want to know **what must be true**. Read this README when
 you want to know **how it behaves, how to run it, and how far it has been
