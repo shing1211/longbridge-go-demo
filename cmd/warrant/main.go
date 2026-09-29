@@ -47,7 +47,7 @@ func main() {
 		"comma-separated warrant symbols for -action quote")
 	u.FS.StringVar(&sortBy, "sort-by", "last_done",
 		"sort field: last_done change_rate change_val volume turnover expiry_date strike_price outstanding_qty implied_volatility delta status")
-	u.FS.StringVar(&sortOrder, "sort-order", "desc", "asc or desc")
+	u.FS.StringVar(&sortOrder, "sort-order", "desc", "asc or desc; surrounding whitespace is ignored")
 	u.FS.IntVar(&sortCount, "count", 10, "how many warrants to return (sort_count)")
 	u.FS.IntVar(&sortOffset, "offset", 0, "sort offset for paging")
 	u.FS.StringVar(&warrantType, "type", "", "optional type filter: call put bull bear inline (comma-separated, empty = all)")
@@ -198,6 +198,8 @@ func printWarrantIssuers(ctx context.Context, qc *quote.QuoteContext) error {
 // The SDK models each enum as a bare int32, so the mapping is by explicit
 // switch rather than by casting. An unknown value is an error, never a silent
 // zero, because a wrong cast here would quietly return the wrong warrants.
+// All six parsers fold case and trim, so a value pasted with padding is
+// accepted the same way by every one of them.
 func buildWarrantFilter() (quote.WarrantFilter, error) {
 	var f quote.WarrantFilter
 
@@ -207,7 +209,7 @@ func buildWarrantFilter() (quote.WarrantFilter, error) {
 	}
 	f.SortBy = sb
 
-	switch strings.ToLower(sortOrder) {
+	switch strings.ToLower(strings.TrimSpace(sortOrder)) {
 	case "asc":
 		f.SortOrder = quote.WarrantAsc
 	case "desc":
