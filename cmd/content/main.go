@@ -16,8 +16,8 @@
 //
 // Publishing is not idempotent and there is no delete-topic method in the SDK,
 // so a published post or reply cannot be retracted from here. They therefore
-// have their own gate, checked inside this package (see contentGate) rather
-// than in the shared guard file:
+// have their own gate, config.ContentGuard, built by the reusable
+// config.WriteGuard helper:
 //
 //  1. LONGPORT_CONTENT_DRY_RUN=0 (or false), AND
 //  2. --confirm-live-content on the command line, AND
@@ -26,14 +26,13 @@
 // All three are required and each one alone still refuses. A refusal prints the
 // exact body that WOULD be sent, prefixed [DRY-RUN], makes no network call at
 // all, and exits 3 — distinct from 0 ("nothing happened, on purpose") and from
-// 1/2 (errors).
+// 1/2 (errors). See config.ExitBlocked.
 package main
 
 import (
 	"context"
 	"fmt"
 	"os"
-	"strconv"
 	"strings"
 	"time"
 
@@ -42,12 +41,6 @@ import (
 	"github.com/shing1211/longbridge-go-demo/internal/cli"
 	appcfg "github.com/shing1211/longbridge-go-demo/internal/config"
 )
-
-// exitBlocked is the exit code for "the safety gate refused", matching the
-// sibling Tiger project's convention and internal/config.ExitBlocked. It is
-// duplicated locally so this gate keeps working regardless of what the shared
-// config package exports.
-const exitBlocked = 3
 
 var (
 	action     string
@@ -97,15 +90,11 @@ func main() {
 	u.Parse(os.Args[1:])
 
 	cfg := u.Load()
-	// Local switch, so the shared loader cannot validate it; do it here.
-	if err := validateContentDryRun(); err != nil {
-		cli.Fail(err)
-	}
 	timeout = appcfg.Timeout()
 	fmt.Fprintf(os.Stderr, "[config] %s\n", cfg)
 	fmt.Fprintf(os.Stderr,
-		"[config] content_dry_run=%v (separate gate: LONGPORT_CONTENT_DRY_RUN "+
-			"+ --confirm-live-content + LONGPORT_MODE=live)\n", contentDryRun())
+		"[config] content_dry_run=%v (separate gate: %s + %s + LONGPORT_MODE=live)\n",
+		appcfg.ContentGuard.DryRun(), appcfg.ContentGuard.DryRunEnv, appcfg.ContentGuard.ConfirmFlag)
 
 	cli.Run(func(ctx context.Context) error {
 		// The content package has no Close(); it is a thin HTTP client. The
@@ -387,8 +376,8 @@ func doCreateTopic(ctx context.Context, cfg *appcfg.Config,
 		"PUBLIC AND IRREVERSIBLE: this is published under your account and "+
 			"visible to other users. The SDK exposes no delete-topic method, so "+
 			"it cannot be retracted from this demo.")
-	if !contentGate(cfg, "publish a new topic") {
-		return nil
+	if err := gate(cfg, "publish a new topic"); err != nil {
+		return err
 	}
 
 	cc, err := connect()
@@ -435,8 +424,8 @@ func doReply(ctx context.Context, cfg *appcfg.Config,
 		"PUBLIC AND IRREVERSIBLE: the reply is published under your account. "+
 			"The SDK's rate limit makes the first 3 replies per topic free, then "+
 			"throttles progressively (3s, 5s, 8s, 13s, 21s, 34s, 55s cap).")
-	if !contentGate(cfg, fmt.Sprintf("reply to topic %s", replyTopic)) {
-		return nil
+	if err := gate(cfg, fmt.Sprintf("reply to topic %s", replyTopic)); err != nil {
+		return err
 	}
 
 	cc, err := connect()
@@ -463,65 +452,21 @@ func doReply(ctx context.Context, cfg *appcfg.Config,
 }
 
 // ------------------------------------------------------------------- the gate
-
-// contentGate is the choke point for both publishing calls. It returns true
-// only when the caller may proceed; on refusal it lists every unsatisfied
-// condition and exits 3 without a single request being made.
 //
-// The three conditions are independent, so no one of them can be satisfied on
-// its own. Mode is required because publishing speaks publicly as the account
-// owner — it is the closest this demo comes to a social action, which is
-// exactly why it needs all three.
-func contentGate(cfg *appcfg.Config, actionDesc string) bool {
-	var reasons []string
-	if !confirm {
-		reasons = append(reasons, "missing --confirm-live-content on the command line")
-	}
-	if contentDryRun() {
-		reasons = append(reasons,
-			"LONGPORT_CONTENT_DRY_RUN is on (default 1; set it to 0 to allow publishing)")
-	}
-	if cfg.Mode != appcfg.ModeLive {
-		reasons = append(reasons, fmt.Sprintf(
-			"LONGPORT_MODE=%s (publishing requires LONGPORT_MODE=live)", cfg.Mode))
-	}
-	if len(reasons) == 0 {
-		return true
-	}
+// gate is the publishing choke point: it runs before the SDK context is
+// created, so a refusal never authenticates and never dials. The three
+// conditions are independent, so no one of them can be satisfied on its own.
+// See cmd/dca for why the error it returns is deliberately short.
 
-	fmt.Fprintf(os.Stderr, "\n[DRY-RUN] BLOCKED: refusing to %s.\n", actionDesc)
-	fmt.Fprintf(os.Stderr, "[DRY-RUN] Unsatisfied condition(s):\n")
-	for _, r := range reasons {
-		fmt.Fprintf(os.Stderr, "[DRY-RUN]   - %s\n", r)
-	}
-	fmt.Fprintf(os.Stderr,
-		"[DRY-RUN] NOTHING was sent to Longbridge. All three are required:\n"+
-			"[DRY-RUN]   LONGPORT_CONTENT_DRY_RUN=0  +  --confirm-live-content  +  LONGPORT_MODE=live\n")
-	os.Exit(exitBlocked)
-	return false // unreachable; keeps vet happy about the control flow
-}
-
-// contentDryRun reports whether publishing is blocked. Local to this package
-// so the shared guard file needs no change; an unparseable value fails safe.
-func contentDryRun() bool {
-	v, ok := os.LookupEnv("LONGPORT_CONTENT_DRY_RUN")
-	if !ok {
-		return true
-	}
-	b, err := strconv.ParseBool(strings.TrimSpace(v))
-	if err != nil {
-		return true
-	}
-	return b
-}
-
-func validateContentDryRun() error {
-	v, ok := os.LookupEnv("LONGPORT_CONTENT_DRY_RUN")
-	if !ok {
-		return nil
-	}
-	if _, err := strconv.ParseBool(strings.TrimSpace(v)); err != nil {
-		return fmt.Errorf("invalid LONGPORT_CONTENT_DRY_RUN=%q: want 1, true, 0 or false", v)
+func gate(cfg *appcfg.Config, desc string) error {
+	if err := appcfg.ContentGuard.Check(cfg, confirm, desc); err != nil {
+		fmt.Fprintf(os.Stderr, "\n[DRY-RUN] BLOCKED: %v\n", err)
+		return appcfg.Blockedf(
+			"%s BLOCKED by the content safety gate. Nothing was sent to Longbridge.\n"+
+				"See the [DRY-RUN] output above for the request and the full list\n"+
+				"of unsatisfied conditions. To perform it:\n"+
+				"  %s=0  +  %s  +  LONGPORT_MODE=live",
+			desc, appcfg.ContentGuard.DryRunEnv, appcfg.ContentGuard.ConfirmFlag)
 	}
 	return nil
 }

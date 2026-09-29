@@ -193,9 +193,9 @@ func Load(file string) (*Config, error) {
 	if err := ValidateWatchlistDryRun(); err != nil {
 		return nil, err
 	}
-	// And for every reusable write guard (dca, alert). Declared as a list so a
-	// new gate is added in exactly one place.
-	if err := ValidateAllDryRunEnvs(DCAGuard, AlertGuard); err != nil {
+	// And for every reusable write guard (dca, alert, sharelist, content).
+	// declaredGuards() is the single list, so a new gate is added in one place.
+	if err := ValidateAllDryRunEnvs(declaredGuards()...); err != nil {
 		return nil, err
 	}
 

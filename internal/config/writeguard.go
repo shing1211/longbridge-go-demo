@@ -71,6 +71,23 @@ type WriteGuard struct {
 
 // The gates this repo actually uses. Declaring them as package-level values
 // means the env-var names and flag names exist in exactly one place.
+//
+// # WHY A VAR, AND WHY THAT IS THE LIMIT OF GO HERE
+//
+// Go has no constant structs, so these cannot be `const`. The values are
+// therefore the one thing in this file a caller could overwrite — flipping
+// DCAGuard.RequireLive to false would strip the live-mode assertion from a
+// money-moving gate without touching a single line of gate logic. Go offers no
+// way to freeze a struct: an unexported var with a getter is the closest
+// approximation, and it would rename the four exported identifiers that every
+// command and every test refers to. So the protection used instead is that the
+// values are asserted field by field in TestDeclaredGuards, which fails the
+// build the moment a field is edited or the var is reassigned. Treat any
+// assignment to these four as a build break.
+//
+// Add a new gate HERE, add it to declaredGuards(), and add it to
+// TestDeclaredGuards — those three places, so a gate can never be declared
+// without its dry-run switch being validated at startup.
 var (
 	// DCAGuard guards the six mutating DCA methods. A DCA plan spends real
 	// money on a recurring schedule and Stop is not reversible, so it requires
@@ -94,7 +111,37 @@ var (
 		ConfirmFlag: "--confirm-live-alert",
 		RequireLive: true,
 	}
+
+	// SharelistGuard guards the five mutating sharelist methods. A sharelist is
+	// not a private scratch preference the way a watchlist group is: it is
+	// user-visible library state that other devices read, and Delete takes the
+	// constituents with it and has no undo.
+	SharelistGuard = WriteGuard{
+		Name:        "sharelist",
+		Description: "a sharelist is account state other devices read, and Delete takes its constituents with it",
+		DryRunEnv:   "LONGPORT_SHARELIST_DRY_RUN",
+		ConfirmFlag: "--confirm-live-sharelist",
+		RequireLive: true,
+	}
+
+	// ContentGuard guards the two publishing methods. This is the only gate in
+	// the repo for a public, attributed, unretractable act, which is why it
+	// demands an explicit live assertion rather than trusting the account type.
+	ContentGuard = WriteGuard{
+		Name:        "content",
+		Description: "a published topic or reply is public, attributed to your account, and cannot be retracted",
+		DryRunEnv:   "LONGPORT_CONTENT_DRY_RUN",
+		ConfirmFlag: "--confirm-live-content",
+		RequireLive: true,
+	}
 )
+
+// declaredGuards is the canonical set: every gate in this repo, in the order
+// their dry-run switches are validated at startup. Config.Load validates this
+// list, so a gate cannot be added without its switch being checked.
+func declaredGuards() []WriteGuard {
+	return []WriteGuard{DCAGuard, AlertGuard, SharelistGuard, ContentGuard}
+}
 
 // DryRun reports whether this guard is currently blocking. It is exported so a
 // command can print the effective state in its startup banner without

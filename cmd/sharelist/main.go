@@ -17,9 +17,8 @@
 //	SortSecurities    POST   /v1/sharelists/{id}/items/sort
 //
 // These are user-library edits, not orders, so they deliberately do NOT reuse
-// the watchlist switch or the order switch. They have their own gate, checked
-// inside this package (see sharelistGate) so that no shared guard file has to
-// know about them:
+// the watchlist switch or the order switch. They have their own gate,
+// config.SharelistGuard, built by the reusable config.WriteGuard helper:
 //
 //  1. LONGPORT_SHARELIST_DRY_RUN=0 (or false), AND
 //  2. --confirm-live-sharelist on the command line, AND
@@ -28,7 +27,12 @@
 // All three are required and each one alone still refuses. A refusal prints the
 // exact request that WOULD have been sent, prefixed [DRY-RUN], makes no
 // network call at all, and exits 3 — deliberately distinct from 0 ("nothing
-// happened, on purpose") and from 1/2 (errors).
+// happened, on purpose") and from 1/2 (errors). See config.ExitBlocked.
+//
+// The one documented exception to "a refused write makes no network call" is
+// -show-state, which is opt-in and off by default: on a blocked add, remove,
+// sort or delete it fetches the list's current constituents so the refusal is
+// reviewable. It changes nothing about the gate's verdict.
 //
 // Delete is irreversible: there is no undelete endpoint in the SDK, and
 // deleting a sharelist takes its constituents with it. The dry-run output says
@@ -48,17 +52,6 @@ import (
 	"github.com/shing1211/longbridge-go-demo/internal/cli"
 	appcfg "github.com/shing1211/longbridge-go-demo/internal/config"
 )
-
-// exitBlocked is the exit code for "the safety gate refused": a write that was
-// deliberately NOT sent. It is distinct from 0 (success), 1 (generic error)
-// and 2 (missing credentials), so a wrapper script can tell "the safety gate
-// did its job" from "the command failed". 3 is the convention used by the
-// sibling Tiger project and by internal/config.ExitBlocked.
-//
-// It is duplicated here as a local constant rather than referenced, because
-// this gate lives entirely inside the command package: it must keep working
-// regardless of what the shared config package happens to export.
-const exitBlocked = 3
 
 var (
 	action     string
@@ -101,16 +94,11 @@ func main() {
 	u.Parse(os.Args[1:])
 
 	cfg := u.Load()
-	// This switch is local to this package, so the shared config loader cannot
-	// reject a bad value; do it here, before any request, and fail loudly.
-	if err := validateSharelistDryRun(); err != nil {
-		cli.Fail(err)
-	}
 	timeout = appcfg.Timeout()
 	fmt.Fprintf(os.Stderr, "[config] %s\n", cfg)
 	fmt.Fprintf(os.Stderr,
-		"[config] sharelist_dry_run=%v (separate gate: LONGPORT_SHARELIST_DRY_RUN "+
-			"+ --confirm-live-sharelist + LONGPORT_MODE=live)\n", sharelistDryRun())
+		"[config] sharelist_dry_run=%v (separate gate: %s + %s + LONGPORT_MODE=live)\n",
+		appcfg.SharelistGuard.DryRun(), appcfg.SharelistGuard.DryRunEnv, appcfg.SharelistGuard.ConfirmFlag)
 
 	cli.Run(func(ctx context.Context) error {
 		// The sharelist package has no Close(); it is a thin HTTP client, so
@@ -300,8 +288,8 @@ func doCreate(ctx context.Context, cfg *appcfg.Config,
 		{"description", orNameAsDescription(listName, listDescription)},
 		{"cover", "https://pub.pbkrs.com/files/202107/kaJSk6BsvPt6NJ3Q/sharelist_v1.png"},
 	}, "")
-	if !sharelistGate(cfg, "create a sharelist") {
-		return nil
+	if err := gate(cfg, "create a sharelist"); err != nil {
+		return err
 	}
 
 	sc, err := connect()
@@ -330,8 +318,8 @@ func doDelete(ctx context.Context, cfg *appcfg.Config,
 		"removes it from your library and takes its constituents with it; "+
 		"recreating it will NOT restore the original contents or its ID.")
 	showCurrentState(ctx, connect)
-	if !sharelistGate(cfg, fmt.Sprintf("delete sharelist %d", detailID)) {
-		return nil
+	if err := gate(cfg, fmt.Sprintf("delete sharelist %d", detailID)); err != nil {
+		return err
 	}
 
 	sc, err := connect()
@@ -393,8 +381,8 @@ func doSecurities(ctx context.Context, cfg *appcfg.Config,
 		{"counter_ids", strings.Join(syms, ",") + "   (derived)"},
 	}, warn)
 	showCurrentState(ctx, connect)
-	if !sharelistGate(cfg, fmt.Sprintf("%s securities on sharelist %d", mode, detailID)) {
-		return nil
+	if err := gate(cfg, fmt.Sprintf("%s securities on sharelist %d", mode, detailID)); err != nil {
+		return err
 	}
 
 	sc, err := connect()
@@ -420,73 +408,20 @@ func doSecurities(ctx context.Context, cfg *appcfg.Config,
 }
 
 // ------------------------------------------------------------------- the gate
-
-// sharelistGate is the choke point for all five mutations. It returns true only
-// when the caller may proceed. On refusal it explains exactly which condition
-// failed and guarantees no write request was made.
 //
-// The three conditions are checked independently, so setting the env var to 0
-// without the flag still refuses, and passing the flag with the env var left
-// alone still refuses. Mode matters here because the account's share library is
-// real, user-visible state that other devices read — unlike a watchlist
-// group, it is not a private scratch preference.
-func sharelistGate(cfg *appcfg.Config, actionDesc string) bool {
-	var reasons []string
-	if !confirmLive {
-		reasons = append(reasons,
-			"missing --confirm-live-sharelist on the command line")
-	}
-	if sharelistDryRun() {
-		reasons = append(reasons,
-			"LONGPORT_SHARELIST_DRY_RUN is on (default 1; set it to 0 to allow sharelist writes)")
-	}
-	if cfg.Mode != appcfg.ModeLive {
-		reasons = append(reasons, fmt.Sprintf(
-			"LONGPORT_MODE=%s (sharelist writes require LONGPORT_MODE=live)", cfg.Mode))
-	}
-	if len(reasons) == 0 {
-		return true
-	}
+// gate is the sharelist choke point for all five mutations: it runs before the
+// SDK context is created, so a refusal never authenticates and never dials.
+// See cmd/dca for why the error it returns is deliberately short.
 
-	fmt.Fprintf(os.Stderr, "\n[DRY-RUN] BLOCKED: refusing to %s.\n", actionDesc)
-	fmt.Fprintf(os.Stderr, "[DRY-RUN] Unsatisfied condition(s):\n")
-	for _, r := range reasons {
-		fmt.Fprintf(os.Stderr, "[DRY-RUN]   - %s\n", r)
-	}
-	fmt.Fprintf(os.Stderr,
-		"[DRY-RUN] NOTHING was sent to Longbridge. All three are required:\n"+
-			"[DRY-RUN]   LONGPORT_SHARELIST_DRY_RUN=0  +  --confirm-live-sharelist  +  LONGPORT_MODE=live\n")
-	os.Exit(exitBlocked)
-	return false // unreachable; keeps vet happy about the control flow
-}
-
-// sharelistDryRun reports whether sharelist mutations are blocked. It is a
-// local copy rather than a call into internal/config on purpose: the shared
-// guard file is owned by another change in this repo, and this switch is
-// specific to these five methods. An unparseable value fails safe: block.
-func sharelistDryRun() bool {
-	v, ok := os.LookupEnv("LONGPORT_SHARELIST_DRY_RUN")
-	if !ok {
-		return true
-	}
-	b, err := strconv.ParseBool(strings.TrimSpace(v))
-	if err != nil {
-		return true
-	}
-	return b
-}
-
-// validateSharelistDryRun rejects a bad LONGPORT_SHARELIST_DRY_RUN at startup
-// rather than letting it read as "on" forever. The config loader cannot check
-// it (it is not a credential and not the order switch), so each sharelist
-// invocation checks it here, before any request.
-func validateSharelistDryRun() error {
-	v, ok := os.LookupEnv("LONGPORT_SHARELIST_DRY_RUN")
-	if !ok {
-		return nil
-	}
-	if _, err := strconv.ParseBool(strings.TrimSpace(v)); err != nil {
-		return fmt.Errorf("invalid LONGPORT_SHARELIST_DRY_RUN=%q: want 1, true, 0 or false", v)
+func gate(cfg *appcfg.Config, desc string) error {
+	if err := appcfg.SharelistGuard.Check(cfg, confirmLive, desc); err != nil {
+		fmt.Fprintf(os.Stderr, "\n[DRY-RUN] BLOCKED: %v\n", err)
+		return appcfg.Blockedf(
+			"%s BLOCKED by the sharelist safety gate. Nothing was sent to Longbridge.\n"+
+				"See the [DRY-RUN] output above for the request and the full list\n"+
+				"of unsatisfied conditions. To perform it:\n"+
+				"  %s=0  +  %s  +  LONGPORT_MODE=live",
+			desc, appcfg.SharelistGuard.DryRunEnv, appcfg.SharelistGuard.ConfirmFlag)
 	}
 	return nil
 }
@@ -598,5 +533,3 @@ func boolStr(v *bool) string {
 	}
 	return fmt.Sprintf("%v", *v)
 }
-
-// keep errors imported for the ErrHelp check below.
