@@ -10,8 +10,11 @@
 // or cancel an order, and the startup banner asserts the order gate is still
 // closed.
 //
-// It does NOT cover AlertContext (4 methods, all writes), SharelistContext
-// (write-shaped), ContentContext, ScreenerContext or PortfolioContext.
+// The five contexts it does NOT cover — AlertContext, SharelistContext,
+// ContentContext, ScreenerContext and PortfolioContext — are all covered
+// elsewhere in this repo: cmd/alert, cmd/sharelist, cmd/content, cmd/screener
+// and cmd/portfolio respectively. ScreenerContext was the last one, and its five
+// methods are all reads, so its absence here was never a safety decision.
 package main
 
 import (

@@ -4,27 +4,24 @@ A small, complete, safety-gated demo of the **Longbridge (Longport) OpenAPI**
 using the official Go SDK, [`github.com/longbridge/openapi-go`](https://pkg.go.dev/github.com/longbridge/openapi-go)
 at **v0.25.2**.
 
-Twelve commands, one shared config loader, and a hard rule that no order can be
+Fifteen commands, one shared config loader, and a hard rule that no order can be
 sent unless you say so three different ways.
 
-**SDK coverage: every exported method on `QuoteContext` and `TradeContext` is
-exercised somewhere in `cmd/`.** That is 66 method definitions (47 on
-`QuoteContext`, 19 on `TradeContext`), covering 62 distinct method names —
-the gap is `Close`, `Subscribe`, `Unsubscribe` and `Trades` appearing on both
-types. See [Coverage](#sdk-coverage) for the command that verifies this.
+**SDK coverage: every exported method on all twelve context types is exercised
+somewhere in `cmd/` — 153 of 153.** See [Coverage](#sdk-coverage) for the one
+command that verifies this, and for the caveat that it is a static check.
 
-The SDK has 130 context methods in total across ten context types. Of the
-other 64, this demo now also covers `SharelistContext` (3 of 8 read methods),
-`ContentContext` (5 of 7 read methods) and `PortfolioContext` (all 5). Still
-unused: `ScreenerContext` (5) and `AlertContext` (4) — screeners and price
-alerts. `FundamentalContext` (32), `AssetContext` (2) and `CalendarContext` (1)
-are now fully covered by `cmd/fundamentals`. See
-[Coverage](#sdk-coverage) for the exact list and the reason for each omission.
+The counts, in full, are: 47 on `QuoteContext`, 32 on `FundamentalContext`, 19
+on `TradeContext`, 12 on `MarketContext`, 11 on `DCAContext`, 8 on
+`SharelistContext`, 7 on `ContentContext`, and 5 each on `ScreenerContext` and
+`PortfolioContext`, plus 4 on `AlertContext`, 2 on `AssetContext` and 1 on
+`CalendarContext`.
 
 > **Status: not yet tested against the live API.** See
 > [Honest status](#honest-status). Everything below was verified by building,
-> vetting, and running against the real Longbridge endpoints with deliberately
-> invalid credentials. No output in this README is copied from a live session.
+> vetting, running the test suite, and running against the real Longbridge
+> endpoints with deliberately invalid credentials. No output in this README is
+> copied from a live session.
 
 ---
 
@@ -34,12 +31,13 @@ are now fully covered by `cmd/fundamentals`. See
 - [What you need to fill in](#what-you-need-to-fill-in)
 - [Simulated vs live — read this](#simulated-vs-live--read-this)
 - [Dry-run semantics and the safety gate](#dry-run-semantics-and-the-safety-gate)
-- [The four safety gates](#the-four-safety-gates)
+- [The six safety gates](#the-six-safety-gates)
 - [Commands](#commands)
 - [The reusable write guard](#the-reusable-write-guard)
 - [Configuration reference](#configuration-reference)
 - [SDK coverage](#sdk-coverage)
 - [Honest status](#honest-status)
+- [Development](#development)
 - [Troubleshooting](#troubleshooting)
 - [Project layout](#project-layout)
 
@@ -78,6 +76,7 @@ go run ./cmd/sharelist                     # your share lists, popular lists
 go run ./cmd/content -action news          # research news for a symbol
 go run ./cmd/dca                            # your DCA plans + statistics
 go run ./cmd/alert -action list             # your price alerts
+go run ./cmd/screener -action indicators    # the screener indicator catalogue
 go run ./cmd/portfolio -action summary     # account-level P&L analytics
 go run ./cmd/fundamentals -action company   # company fundamentals, ratings, valuation
 go run ./cmd/fundamentals -action calendar  # financial calendar
@@ -235,11 +234,37 @@ immediately before the SDK call. The trade context is created **lazily**, so a
 dry run does not open a websocket or make an authenticated round trip. If you
 add a new write operation, copy the existing `gate(...)` shape.
 
+### The mode test is fail-closed
+
+Condition 3 above is implemented as `if c.Mode != ModeLive { refuse }`, not as
+`if c.Mode == ModeSimulated { refuse }`. The distinction matters:
+
+| Written as | An empty, mistyped or invented `Mode` |
+|---|---|
+| `== ModeSimulated` → refuse | **passes** the check and the gate opens |
+| `!= ModeLive` → refuse | refuses |
+
+`config.Load` cannot currently produce a `Config` whose `Mode` is anything other
+than `simulated` or `live` — it rejects any other value outright — so the old
+permissive form was a **latent** hole rather than a live one. It was also
+inconsistent with `WriteGuard.Unsatisfied` in the same package, which has always
+used the deny-by-default shape. A latent hole in the one function that guards
+money is still a hole, so the deny-by-default form wins. `TestGuardWrite_UnknownModeIsBlocked`
+and `TestWriteGuard_UnsatisfiedAlreadyDeniesUnknownModes` pin it, and the
+doc comment on `GuardWrite` says not to "simplify" it back.
+
+Two smaller fail-closed rules follow the same principle. A `WriteGuard`'s
+`DryRun()` treats an **unset** variable and an **unparseable** one identically —
+both mean "still in dry run" — because guessing the other way is the dangerous
+default. And `strconv.ParseBool` is used rather than a truthiness test, so only
+an exact `0`/`false` (and `1`/`true`) is honoured; `LONGPORT_DRY_RUN=maybe` is
+a startup error, not a silent default.
+
 ---
 
-## The four safety gates
+## The six safety gates
 
-This demo guards four different kinds of mutation with four **separate**,
+This demo guards six different kinds of mutation with six **separate**,
 independently-defaulted gates. They are not interchangeable, and none of them
 opens another.
 
@@ -249,12 +274,12 @@ opens another.
 | Env switch | `LONGPORT_DRY_RUN` (default `1`) | `LONGPORT_WATCHLIST_DRY_RUN` (default `1`) | `LONGPORT_SHARELIST_DRY_RUN` (default `1`) | `LONGPORT_CONTENT_DRY_RUN` (default `1`) |
 | Flag | `--confirm-live` | `--confirm` | `--confirm-live-sharelist` | `--confirm-live-content` |
 | Also requires | `LONGPORT_MODE=live` | — | `LONGPORT_MODE=live` | `LONGPORT_MODE=live` |
-| Implementation | `config.GuardWrite` | `config.GuardWatchlist` | `sharelistGate` (in `cmd/sharelist`) | `contentGate` (in `cmd/content`) |
+| Implementation | `config.GuardWrite` | `config.GuardWatchlist` | `config.SharelistGuard` (a `config.WriteGuard`) | `config.ContentGuard` (a `config.WriteGuard`) |
 | Blocked exit code | `3` (`config.ExitBlocked`) | `3` (`config.ExitBlocked`) | **`3`** | **`3`** |
 
-Two further gates — for DCA plans and price alerts — were added alongside
-these. They use the shared, reusable `config.WriteGuard` helper rather than a
-per-command copy of the loop:
+Two further gates — for DCA plans and price alerts — use the same shared,
+reusable `config.WriteGuard` helper as the sharelist and content gates above,
+rather than a per-command copy of the loop:
 
 | | DCA gate | Price-alert gate |
 | --- | --- | --- |
@@ -269,6 +294,24 @@ All six gates refuse independently and all six exit **3**. See
 [`dca`](#dca--dollar-cost-averaging-plans-with-a-dedicated-write-gate),
 [`alert`](#alert--price-alerts-with-a-dedicated-write-gate) and
 [The reusable write guard](#the-reusable-write-guard).
+
+Every binary's `-h` prints **all six** dry-run switches plus `LONGPORT_MODE` in
+its `Safety:` block, so the set of switches is discoverable from any command
+without reading this file:
+
+```console
+$ ./bin/screener -h 2>&1 | grep 'LONGPORT_.*_DRY_RUN'
+  LONGPORT_WATCHLIST_DRY_RUN   1/true (default) blocks watchlist writes
+  LONGPORT_DCA_DRY_RUN          1/true (default) blocks DCA plan writes.
+  LONGPORT_ALERT_DRY_RUN        1/true (default) blocks price-alert writes.
+  LONGPORT_SHARELIST_DRY_RUN   1/true (default) blocks sharelist writes.
+  LONGPORT_CONTENT_DRY_RUN     1/true (default) blocks content publishes.
+$ # five *_DRY_RUN lines here; LONGPORT_DRY_RUN itself is the sixth and sits above them
+```
+
+Note the block is written to **stderr**, not stdout — `flag` prints usage to
+`fs.Output()`, which defaults to stderr. So `./bin/screener -h | grep …` finds
+nothing and you want `./bin/screener -h 2>&1 | grep …`.
 
 **Why watchlist writes are not under the order gate.** The order gate's third
 condition, `LONGPORT_MODE=live`, exists because "live" means real money. A
@@ -289,9 +332,11 @@ orders nor private scratch preferences, so neither existing gate fits:
 
 Both therefore require all three conditions, including `LONGPORT_MODE=live`:
 these are actions other people can see, so an explicit "this is real" assertion
-is appropriate in a way that it is not for a watchlist group. Their gates live
-**inside the command packages** rather than in `internal/config/guard.go`, so
-that adding them required no change to shared guard code.
+is appropriate in a way that it is not for a watchlist group. Both are declared
+as `config.WriteGuard` values in `internal/config/writeguard.go` and are
+listed in `declaredGuards()`, which `config.Load` validates at startup — so a
+bad `LONGPORT_SHARELIST_DRY_RUN` or `LONGPORT_CONTENT_DRY_RUN` is now rejected
+by **every** command in the repo, not only by the two that own those switches.
 
 Either gate refusing makes **no network call at all**: the write commands print
 the exact request they would send, explain the refusal, and exit **3** without
@@ -343,12 +388,16 @@ silently treated as "on", and an unparseable value at runtime fails safe.
 
 ### The sharelist and content gates in practice
 
-The sharelist and content refusals list **every** unsatisfied condition rather
-than the first, print the request body that would have been sent on
-`[DRY-RUN]`-prefixed lines, and exit **3**:
+Both gates were refactored onto the shared `config.WriteGuard`, so their refusals
+now come from one code path. Each one lists **every** unsatisfied condition
+rather than the first, adds a `No change was sent, because <reason>.` line drawn
+from the guard's own description, prints the request that would have been sent
+on `[DRY-RUN]`-prefixed lines, and exits **3**. These transcripts are pasted from
+real runs, not written by hand:
 
 ```console
-$ go run ./cmd/sharelist -action delete -id 12345 -confirm-live-sharelist
+$ go run ./cmd/sharelist -action delete -id 12345 --confirm-live-sharelist
+[config] mode=simulated  (expected: credentials from a SIMULATED account) dry_run=true app_key=abcd******kl http=https://openapi.longbridge.com (SDK default) quote_ws=wss://openapi-quote.longbridge.com/v2 (SDK default) trade_ws=wss://openapi-trade.longbridge.com/v2 (SDK default)
 [config] sharelist_dry_run=true (separate gate: LONGPORT_SHARELIST_DRY_RUN + --confirm-live-sharelist + LONGPORT_MODE=live)
 
 [DRY-RUN] --- Delete (DELETE /v1/sharelists/{id}) request that would be sent ---
@@ -356,18 +405,73 @@ $ go run ./cmd/sharelist -action delete -id 12345 -confirm-live-sharelist
 [DRY-RUN]   WARNING        IRREVERSIBLE: there is no undelete endpoint. Deleting a sharelist removes it from your library and takes its constituents with it; recreating it will NOT restore the original contents or its ID.
 
 [DRY-RUN] BLOCKED: refusing to delete sharelist 12345.
-[DRY-RUN] Unsatisfied condition(s):
-[DRY-RUN]   - LONGPORT_SHARELIST_DRY_RUN is on (default 1; set it to 0 to allow sharelist writes)
-[DRY-RUN]   - LONGPORT_MODE=simulated (sharelist writes require LONGPORT_MODE=live)
-[DRY-RUN] NOTHING was sent to Longbridge. All three are required:
-[DRY-RUN]   LONGPORT_SHARELIST_DRY_RUN=0  +  --confirm-live-sharelist  +  LONGPORT_MODE=live
+No change was sent, because a sharelist is account state other devices read, and Delete takes its constituents with it.
+
+Unsatisfied condition(s):
+  - LONGPORT_SHARELIST_DRY_RUN is on (default 1; set it to 0 to allow sharelist writes)
+  - LONGPORT_MODE=simulated (sharelist writes require LONGPORT_MODE=live)
+
+NOTHING was sent to Longbridge. To actually perform this write, set:
+  LONGPORT_SHARELIST_DRY_RUN=0  +  --confirm-live-sharelist  +  LONGPORT_MODE=live
+All of them are required; any one alone still blocks the write.
+error: delete sharelist 12345 BLOCKED by the sharelist safety gate. Nothing was sent to Longbridge.
+See the [DRY-RUN] output above for the request and the full list
+of unsatisfied conditions. To perform it:
+  LONGPORT_SHARELIST_DRY_RUN=0  +  --confirm-live-sharelist  +  LONGPORT_MODE=live
 $ echo $?
 3
 ```
 
-With all three satisfied the gate opens and the request goes out (here rejected
-for the dummy token, which is the only observable proof available without a
-real token):
+Note the shape of the last three lines: `gate()` prints the detailed block and
+returns a short `Blockedf(...)`, which `cli.Fail` turns into exit **3**. The
+mechanism moved from a local `os.Exit(3)` to `return Blockedf(...)`, so the
+refusal now travels up the same path as every other guard refusal in the repo.
+
+The content refusal is the same shape, with the content guard's own wording:
+
+```console
+$ go run ./cmd/content -action create-topic -topic-type article \
+    -title "700.HK earnings" -body "Markdown body" -tickers 700.HK --confirm-live-content
+[config] mode=simulated  (expected: credentials from a SIMULATED account) dry_run=true app_key=abcd******kl http=https://openapi.longbridge.com (SDK default) quote_ws=wss://openapi-quote.longbridge.com/v2 (SDK default) trade_ws=wss://openapi-trade.longbridge.com/v2 (SDK default)
+[config] content_dry_run=true (separate gate: LONGPORT_CONTENT_DRY_RUN + --confirm-live-content + LONGPORT_MODE=live)
+
+[DRY-RUN] --- CreateTopic (POST /v1/content/topics) request that would be sent ---
+[DRY-RUN]   body         Markdown body
+[DRY-RUN]   title        700.HK earnings
+[DRY-RUN]   topic_type   article
+[DRY-RUN]   tickers      700.HK
+[DRY-RUN]   WARNING        PUBLIC AND IRREVERSIBLE: this is published under your account and visible to other users. The SDK exposes no delete-topic method, so it cannot be retracted from this demo.
+
+[DRY-RUN] BLOCKED: refusing to publish a new topic.
+No change was sent, because a published topic or reply is public, attributed to your account, and cannot be retracted.
+
+Unsatisfied condition(s):
+  - LONGPORT_CONTENT_DRY_RUN is on (default 1; set it to 0 to allow content writes)
+  - LONGPORT_MODE=simulated (content writes require LONGPORT_MODE=live)
+
+NOTHING was sent to Longbridge. To actually perform this write, set:
+  LONGPORT_CONTENT_DRY_RUN=0  +  --confirm-live-content  +  LONGPORT_MODE=live
+All of them are required; any one alone still blocks the write.
+error: publish a new topic BLOCKED by the content safety gate. Nothing was sent to Longbridge.
+See the [DRY-RUN] output above for the request and the full list
+of unsatisfied conditions. To perform it:
+  LONGPORT_CONTENT_DRY_RUN=0  +  --confirm-live-content  +  LONGPORT_MODE=live
+$ echo $?
+3
+```
+
+Two things about the shared wording are worth stating so the text does not look
+like a typo: the condition strings say **"content writes"**, not "publishing",
+because they are generated from the guard's `Name` field and read
+`set it to 0 to allow <Name> writes` / `<Name> writes require LONGPORT_MODE=live`
+for every `WriteGuard`. And the trailer is `To actually perform this write,
+set:` followed by the recipe and `All of them are required; any one alone still
+blocks the write.` — the same three lines for all four `WriteGuard`-backed
+gates, differing only in the variable and flag names.
+
+With all three conditions satisfied the gate opens and the request goes out (here
+rejected for the dummy token, which is the only observable proof available
+without a real token):
 
 ```console
 $ LONGPORT_SHARELIST_DRY_RUN=0 LONGPORT_MODE=live \
@@ -377,9 +481,9 @@ error: creating sharelist "demo": longbridge openapi error, httpStatus:401 code:
 
 Exit code **3** is used specifically for a refusal, matching the convention in
 the sibling Tiger project. It is deliberately distinct from `0` (success), `1`
-(generic error) and `2` (missing credentials), so a script can distinguish "the
+(a real failure) and `2` (missing credentials), so a script can distinguish "the
 safety gate did its job" from "the command failed". It is the same status the
-order and watchlist gates use, so all four gates agree.
+order and watchlist gates use, so all six gates agree.
 
 `-show-state` is the one opt-in exception to "a refused write makes no
 request": on a blocked `add`/`remove`/`sort` it fetches and prints the list's
@@ -611,7 +715,7 @@ wrong cast would quietly return the wrong warrants.
 ### `watchlist` — saved groups, with a gated editor
 
 `-action list` is a pure read. The other four actions mutate your account's
-saved groups and are behind the [watchlist gate](#the-two-safety-gates).
+saved groups and are behind the [watchlist gate](#the-six-safety-gates).
 
 ```bash
 go run ./cmd/watchlist -action list
@@ -731,7 +835,7 @@ empty on a very fast exit.
 ### `sharelist` — user share lists, with a gated editor
 
 Your own share lists, the full detail of one list including its constituents,
-the platform's popular lists — and, behind the [sharelist gate](#the-four-safety-gates),
+the platform's popular lists — and, behind the [sharelist gate](#the-six-safety-gates),
 the five write methods on the lists you own.
 
 ```bash
@@ -796,7 +900,7 @@ the SDK silently converts `700.HK` to a `counter_id` of `ST/HK/700` and a bare
 ### `content` — research and community content, with gated publishing
 
 Discussion topics and news for a symbol, one topic's full record, the replies
-on a topic, your own topics — and, behind the [content gate](#the-four-safety-gates),
+on a topic, your own topics — and, behind the [content gate](#the-six-safety-gates),
 publishing a topic or a reply.
 
 ```bash
@@ -1150,6 +1254,115 @@ dry-run `WARNING` line says out loud.
 
 ---
 
+### `screener` — read-only stock screener
+
+All **5** `ScreenerContext` methods, one `-action` per method. Four are `GET`s
+and one is a `POST` that queries:
+
+| Action | SDK method | Endpoint | Requests |
+| --- | --- | --- | --- |
+| `indicators` | `ScreenerIndicators` | `GET /v1/quote/ai/screener/indicators` | 1 |
+| `recommend` | `ScreenerRecommendStrategies` | `GET /v1/quote/ai/screener/strategies/recommend` | 1 |
+| `mine` | `ScreenerUserStrategies` | `GET /v1/quote/ai/screener/strategies/mine` | 1 |
+| `strategy` | `ScreenerStrategy` | `GET /v1/quote/ai/screener/strategy/{id}` | 1 |
+| `search` | `ScreenerSearch` | `POST /v1/quote/ai/screener/search` | **1 or 2** — see below |
+
+**There is no write gate here, and that is the correct answer rather than an
+oversight.** The `POST` is a query: it takes a market, a filter list and a page
+and returns matching securities. It is the same shape as `TopMovers` in
+`cmd/market`, which is likewise a `POST` and likewise unguarded. Nothing
+server-side changes. As in `cmd/market`, `cmd/fundamentals` and
+`cmd/warrant`, the startup banner asserts the **order** gate is still closed, so
+running the screener with dry run off and mode live refuses to start rather than
+proceeding in a misconfigured environment.
+
+```bash
+go run ./cmd/screener -action indicators                    # the indicator catalogue
+go run ./cmd/screener -action recommend -market HK          # strategies Longbridge suggests
+go run ./cmd/screener -action mine -market US               # your own saved strategies
+go run ./cmd/screener -action strategy -strategy-id 12345   # one strategy's filters
+go run ./cmd/screener -action search -market HK -condition 'pettm::30' -page 0
+go run ./cmd/screener -action search -market US -condition 'pettm:0:1' -show capmk,roe
+go run ./cmd/screener -action search -strategy-id 12345     # mode A: two requests
+```
+
+| Flag | Default | Purpose |
+| --- | --- | --- |
+| `-action` | `indicators` | `indicators`, `recommend`, `mine`, `strategy` or `search`. |
+| `-market` | `HK` | `HK US CN SG UK`. Used by `recommend`, `mine` and `search`; **ignored by `search` when `-strategy-id` is set**. |
+| `-strategy-id` | — | **Required for `strategy`**; optional for `search`. `0` is rejected, not treated as unset. |
+| `-condition` | — | `search` only: comma-separated `KEY:MIN:MAX[:k=v;k=v]`. Either bound may be empty. |
+| `-show` | — | `search` only: extra return columns, e.g. `capmk,roe`. |
+| `-page` | `0` | `search` only. **0-indexed.** |
+| `-size` | `20` | `search` only. |
+| `-timeout` | `15s` | Per-request timeout. |
+
+Three behaviours here look like bugs and are not. All three were read out of
+`screener/context.go` in v0.25.2. Each is confirmed to the extent it can be:
+all five actions were run with a deliberately invalid token and each returns a
+real 401, which proves the dispatch and the request construction but says
+nothing about a *successful* response — so the three behaviours below are
+**source facts, not observations**.
+
+**1. `-action search -strategy-id N` issues TWO HTTP requests.** The SDK does
+not take a strategy and filters it client-side. With a non-nil `strategyID` it
+first `GET`s `/v1/quote/ai/screener/strategy/{id}`, reads that strategy's own
+`market` and its `filter.filters[]`, and only then `POST`s the search with those
+filters. So in this mode:
+
+- `-condition` is **ignored** — the strategy's own filters are used.
+- `-market` is **ignored** — the market comes from the strategy, and the SDK
+  substitutes `"US"` if the strategy's market is blank or `"-"`.
+- The command prints which mode it is in, and why, before making the call, so the
+  request count is never a surprise.
+
+**2. `-page` is 0-indexed.** `page 0` is the first page. Every other command in
+this repo is 1-based, which makes the screener the odd one out; it is a property
+of the screener API, not a choice here. The flag help, the `-h` notes and the
+runtime banner all say so, and the banner converts to a 1-based ordinal for
+display only (`-page 0` prints "page 0 means the 1st page") so the number you
+typed is never quietly rewritten.
+
+**3. `-strategy-id 0` is rejected rather than silently switching modes.** The
+SDK signals "no strategy" with a `nil *int64`. Mapping an explicit `0` to `nil`
+would quietly switch the user from mode A to mode B and return a *different
+result set* from the one they asked for, so the command refuses it and says
+what to do instead: omit the flag to search with `-condition`, or pass a real id
+from `-action recommend`. The same applies to a negative id. Detecting this
+needs `fs.Visit`, because a plain `int64` default of `0` cannot tell an omitted
+flag from an explicit `0`.
+
+### Every response is `json.RawMessage`, and the renderer is a pretty-printer
+
+`screener/types.go` defines **no response structs at all**. Each of the five
+responses is a wrapper whose only field is `Data json.RawMessage`, because the
+payload shape varies by indicator and strategy. There is therefore nothing to
+map field-by-field, and this command does not invent one. Instead it:
+
+- unmarshals into `any` and re-marshals with `encoding/json`, which emits object
+  keys in **sorted order** — so the same payload always prints identically and
+  two runs can be diffed;
+- clips each block at **4000 bytes**, dropping a partial trailing rune so the
+  marker is never preceded by a broken character, and appending
+  `…(truncated, N bytes total)`;
+- turns off HTML escaping, because indicator labels and company names can
+  legitimately contain `<`, `>` and `&` and escaping them buys nothing in a
+  terminal;
+- falls back to printing the body verbatim if it is not decodable JSON, rather
+  than failing the run.
+
+**This output was written from the SDK's struct definitions alone and has never
+been observed from a live API.** All five actions were run with a deliberately
+invalid token and each returns a real 401, so the wiring is confirmed — but a
+401 says nothing about the shape of a successful payload, which is the one thing
+this renderer has to get right. Run `-action indicators` first to discover the
+real field names before assuming anything about a search result. The SDK also
+strips the `filter_` prefix from every key, both in the filters it sends and in
+the `indicators[].key` it returns, so the keys you see are the same short names
+you put in `-condition`.
+
+---
+
 ## The reusable write guard
 
 Adding a third and fourth family of guarded mutations would have meant a third
@@ -1187,13 +1400,46 @@ exit 3.
 
 Precedence: **environment variables beat the YAML file**, and the YAML file is
 only consulted for values the environment did not supply. The file is
-auto-detected as `config.yaml`, `config.local.yaml`, `config.yml` or
-`config.toml`; `-config PATH` overrides the search. An explicit `-config` path
-that does not exist is an error, so a typo cannot silently fall back to env.
+auto-detected as `config.yaml` or `config.local.yaml`, in that order, and
+`-config PATH` overrides the search. An explicit `-config` path that does not
+exist is an error, so a typo cannot silently fall back to env.
 
 Copy `config.example.yaml` to `config.yaml`. The top-level key **must** be
 `longbridge:` — the SDK errors with `Longbridge config is not exist in yaml
 file` otherwise.
+
+### Config files: YAML only, and why
+
+Only `config.yaml` and `config.local.yaml` are auto-detected, and an explicit
+`-config` with any other extension is a hard error (exit 1):
+
+```console
+$ go run ./cmd/quote -config ./config.yml
+error: config file "./config.yml": this demo reads YAML only, so the file name must end in .yaml (got ".yml"). The Longbridge SDK can also parse TOML and .env, but that reader is not wired up here. Convert the file (see config.example.yaml), rename it to config.yaml, or supply LONGBRIDGE_APP_KEY, LONGBRIDGE_APP_SECRET and LONGBRIDGE_ACCESS_TOKEN in the environment
+$ echo $?
+1
+```
+
+This is a fix, and the two bugs it removes were both real:
+
+- **`config.yml` broke the loader outright.** The SDK infers a config file's
+  format from its extension and its `configTypeMap` knows `.env`, `.yaml` and
+  `.toml` — but **not** `.yml`. Auto-detecting `config.yml` therefore made the
+  SDK fail with `config type:.yml not support` **even when the environment had
+  already supplied all three credentials**, because the file was still handed to
+  the SDK via `WithFilePath`.
+- **`config.toml` supplied no credential at all.** This loader's own
+  credential top-up was YAML-only, and the missing-credential check runs *before*
+  the SDK is ever handed the file — so a `config.toml` user's credentials were
+  unreachable even though the SDK would have parsed them fine a moment later.
+
+The SDK can still parse TOML and `.env`; this demo simply does not wire that
+reader up, and offering a filename it cannot honour is worse than refusing the
+filename. `TestCandidateFilesAreYamlOnly`, `TestLoad_TomlIsNotACandidate`,
+`TestLoad_YmlIsNotACandidate` and
+`TestLoad_ExplicitNonYamlPathIsAPlainError` pin the behaviour, including that
+the extension is checked **before** the file is stat'ed, so a wrong format is
+reported as a wrong format even when the file does not exist.
 
 ### Credential variables
 
@@ -1226,7 +1472,7 @@ file` otherwise.
 | --- | --- | --- |
 | `LONGPORT_DRY_RUN` | `1` | Blocks all order writes. Must be `0` to write. |
 | `LONGPORT_MODE` | `simulated` | `simulated` or `live`. |
-| `LONGPORT_WATCHLIST_DRY_RUN` | `1` | Blocks watchlist writes. Must be `0` to write. See [the four gates](#the-four-safety-gates). |
+| `LONGPORT_WATCHLIST_DRY_RUN` | `1` | Blocks watchlist writes. Must be `0` to write. See [the six gates](#the-six-safety-gates). |
 | `LONGPORT_SHARELIST_DRY_RUN` | `1` | Blocks sharelist writes. Must be `0` **and** `--confirm-live-sharelist` **and** `LONGPORT_MODE=live`. |
 | `LONGPORT_CONTENT_DRY_RUN` | `1` | Blocks publishing topics/replies. Must be `0` **and** `--confirm-live-content` **and** `LONGPORT_MODE=live`. |
 | `LONGPORT_DCA_DRY_RUN` | `1` | Blocks DCA plan writes. Must be `0` **and** `--confirm-live-dca` **and** `LONGPORT_MODE=live`. |
@@ -1237,9 +1483,29 @@ file` otherwise.
 | Code | Meaning |
 | --- | --- |
 | `0` | Success. The command did what it was asked. |
-| `1` | A real failure: the API rejected the call, or a flag value was unusable. |
-| `2` | Missing credentials, or a usage error. |
+| `1` | A real failure: the API rejected the call, a flag value was unusable, a flag was unknown, or a config file could not be used. |
+| `2` | **Missing credentials, and nothing else.** |
 | `3` | **BLOCKED.** A safety guard refused a write. Nothing was sent. |
+
+Exit `2` is reached by exactly one condition: a `*config.MissingCredentialError`.
+An earlier version of this table said exit 2 also covered "a usage error", which
+contradicted the row above it and the code. A bad flag — unknown, or a value
+the command cannot use — is a `flag` error, is **not** a
+`MissingCredentialError`, and therefore exits **1**:
+
+```console
+$ go run ./cmd/quote -period nonsense >/dev/null 2>&1; echo $?
+1
+$ env -u LONGBRIDGE_APP_KEY -u LONGBRIDGE_APP_SECRET -u LONGBRIDGE_ACCESS_TOKEN \
+    go run ./cmd/quote >/dev/null 2>&1; echo $?
+2
+```
+
+Exit `2` exists so a script can rely on it meaning "go and fix your
+environment", and nothing else. The distinction is made once, in `cli.Fail`,
+and `TestFail_ExitCodeContract` pins the mapping — including by re-running the
+test binary as a subprocess and checking the real exit status, not just
+asserting on a mock.
 
 Exit `3` is reserved, and is the one to check when scripting. It is defined
 once as `config.ExitBlocked` and reached by every guard refusal, which returns
@@ -1249,8 +1515,9 @@ indistinguishable from a completed order — do not reintroduce that.
 
 Every guarded command uses it: `trade` (submit/replace/cancel),
 `executions -action withdraw`, `watchlist` (create/update/pin/delete), `dca`
-(create/update/pause/resume/stop/set-reminder), `alert` (add/update/delete) and
-`sharelist` / `content` where present.
+(create/update/pause/resume/stop/set-reminder), `alert` (add/update/delete),
+`sharelist` (create/delete/add/remove/sort) and `content`
+(create-topic/reply).
 
 ### Secret handling
 
@@ -1264,49 +1531,80 @@ banner redacts the App Key only, keeping at most 4 leading characters:
 
 `.gitignore` excludes `.env`, `.env.*`, `config.yaml`, `config.local.yaml`,
 `config.yml` and `config.toml`, while explicitly keeping `.env.example` and
-`config.example.yaml`.
+`config.example.yaml`. The last two are ignored even though they are no longer
+candidates, so a stale `config.yml` or `config.toml` left in the tree cannot sit
+there looking supported — and if you pass one explicitly you now get a clear
+error rather than a confusing SDK one.
 
 ---
 
 ## SDK coverage
 
-This demo covers **every exported method on `QuoteContext` and
-`TradeContext`** — 66 method definitions, 62 distinct names. You can check
-that claim yourself without trusting this README:
+**All 153 exported context methods across all twelve context types are covered:
+153 of 153.** `cmd/screener` closed the last gap, `ScreenerContext`.
+
+You can check that claim yourself without trusting this README. **One command
+covers every context**, and it is deliberately receiver-agnostic — note the
+`[a-z]+` in the pattern, not `[cd]`. The receiver letter is not uniform across
+the SDK: `MarketContext`'s methods are declared on `m *MarketContext` while
+every other context uses `c *XContext` (and DCA uses `d`). A pattern written as
+`\(c \*` silently misses all 12 `MarketContext` methods, which is why the older
+version of this section was quietly incomplete.
 
 ```console
 $ BASE=$(go env GOMODCACHE)/github.com/longbridge/openapi-go@v0.25.2
-$ grep -hoE '^func \(c \*(Quote|Trade)Context\) [A-Z][A-Za-z0-9]*' \
-    "$BASE"/quote/*.go "$BASE"/trade/*.go | sed -E 's/.*\) //' | sort -u \
-  | while read -r m; do
-      grep -rqE "\.$m\(" cmd/ || echo "UNCOVERED: $m"
-    done
+$ grep -rhoE '^func \([a-z]+ \*[A-Za-z]+Context\) [A-Z][A-Za-z0-9]*' \
+    "$BASE" --include=*.go \
+  | sed -E 's/^func \([a-z]+ \*([A-Za-z]+)Context\) ([A-Za-z0-9]*)/\1 \2/' | sort -u \
+  | tee /tmp/ctx.txt | wc -l
+153
+$ while read -r ctx m; do grep -rqE "\.$m\(" cmd/ || echo "UNCOVERED: $ctx $m"; done < /tmp/ctx.txt
 $ # (no output = fully covered)
+$ cut -d' ' -f1 /tmp/ctx.txt | uniq -c
+      4 Alert
+      2 Asset
+      1 Calendar
+      7 Content
+     11 DCA
+     32 Fundamental
+     12 Market
+      5 Portfolio
+     47 Quote
+      5 Screener
+      8 Sharelist
+     19 Trade
 ```
 
-The same check for `FundamentalContext`, `AssetContext` and `CalendarContext`
-(35 methods, all in `cmd/fundamentals`):
+For reference, here are the per-context greps the older version of this section
+used, corrected to match receiver letters. They are subsumed by the loop above
+but are kept because they read more clearly when you only care about one area.
 
 ```console
+# Quote + Trade: 47 + 19 methods, both on receiver c
+$ grep -hoE '^func \(c \*(Quote|Trade)Context\) [A-Z][A-Za-z0-9]*' \
+    "$BASE"/quote/*.go "$BASE"/trade/*.go | sed -E 's/.*\) //' | sort -u \
+  | while read -r m; do grep -rqE "\.$m\(" cmd/ || echo "UNCOVERED: $m"; done
+$ # (no output = fully covered)
+
+# Fundamental + Asset + Calendar: 32 + 2 + 1 methods, all in cmd/fundamentals
 $ grep -hoE '^func \(c \*(Fundamental|Asset|Calendar)Context\) [A-Z][A-Za-z0-9]*' \
     "$BASE"/fundamental/*.go "$BASE"/asset/*.go "$BASE"/calendar/*.go \
   | sed -E 's/.*\) //' | sort -u \
-  | while read -r m; do
-      grep -rqE "\.$m\(" cmd/ || echo "UNCOVERED: $m"
-    done
+  | while read -r m; do grep -rqE "\.$m\(" cmd/ || echo "UNCOVERED: $m"; done
 $ # (no output = fully covered)
-```
 
-And for `DCAContext` (11 methods, all in `cmd/dca`) and `AlertContext`
-(4 methods, all in `cmd/alert`):
-
-```console
-$ grep -hoE '^func \([cd] \*(DCA|Alert)Context\) [A-Z][A-Za-z0-9]*' \
-    "$BASE"/dca/*.go "$BASE"/alert/*.go \
+# Market: 12 methods, receiver m — this is the one a \(c \* pattern misses
+$ grep -hoE '^func \(m \*MarketContext\) [A-Z][A-Za-z0-9]*' "$BASE"/market/*.go \
   | sed -E 's/.*\) //' | sort -u \
-  | while read -r m; do
-      grep -rqE "\.$m\(" cmd/ || echo "UNCOVERED: $m"
-    done
+  | while read -r m; do grep -rqE "\.$m\(" cmd/ || echo "UNCOVERED: $m"; done
+$ # (no output = fully covered)
+
+# DCA (receiver d), Alert, Sharelist, Content, Screener, Portfolio: 11 + 4 + 8 + 7 + 5 + 5
+$ grep -rhoE '^func \([a-z]+ \*(DCA|Alert|Sharelist|Content|Screener|Portfolio)Context\) [A-Z][A-Za-z0-9]*' \
+    "$BASE"/dca/*.go "$BASE"/alert/*.go "$BASE"/sharelist/*.go \
+    "$BASE"/content/*.go "$BASE"/screener/*.go "$BASE"/portfolio/*.go \
+  | sed -E 's/.*\) //' | sort -u \
+  | while read -r m; do grep -rqE "\.$m\(" cmd/ || echo "UNCOVERED: $m"; done
 $ # (no output = fully covered)
 ```
 
@@ -1315,26 +1613,40 @@ every method was *exercised against a live account*. No command in this repo
 has been run with a working access token, so no successful response has ever
 been observed. See [Honest status](#honest-status).
 
-Not covered, and why:
+The per-context picture, and where each group lives:
 
-| Area | Context type | Methods | Covered | Why not |
+| Area | Context type | Methods | Covered | Notes |
 | --- | --- | --- | --- | --- |
-| Fundamentals | `FundamentalContext` | 32 | 32 | Fully covered by `cmd/fundamentals`. |
-| Share lists | `SharelistContext` | 8 | 8 | Fully covered by `cmd/sharelist`; the 5 writes sit behind the sharelist gate. |
-| Research content | `ContentContext` | 7 | 7 | Fully covered by `cmd/content`; the 2 writes sit behind the content gate. |
-| Screeners | `ScreenerContext` | 5 | 0 | Symbol screening. |
-| Portfolios | `PortfolioContext` | 5 | 5 | Fully covered. |
-| Price alerts | `AlertContext` | 4 | 0 | **All writes.** Would need its own third guard. |
-| Assets | `AssetContext` | 2 | 2 | Fully covered by `cmd/fundamentals`. |
-| Calendar | `CalendarContext` | 1 | 1 | Fully covered by `cmd/fundamentals`. `cmd/market` also has `TradingDays` from `QuoteContext`. |
+| Market data | `QuoteContext` | 47 | 47 | `cmd/quote`, `cmd/watch`, `cmd/market` (2 sections), `cmd/executions`, `cmd/reference`, `cmd/warrant`, `cmd/watchlist -action list`. |
+| Fundamentals | `FundamentalContext` | 32 | 32 | `cmd/fundamentals`, one `-action` per method. |
+| Orders & account | `TradeContext` | 19 | 19 | `cmd/trade`, plus `cmd/executions` and `cmd/watch -orders`. |
+| Market-wide | `MarketContext` | 12 | 12 | `cmd/market`, one `-sections` value per method. |
+| DCA | `DCAContext` | 11 | 11 | `cmd/dca`; 6 writes behind the DCA gate. |
+| Share lists | `SharelistContext` | 8 | 8 | `cmd/sharelist`; 5 writes behind the sharelist gate. |
+| Research content | `ContentContext` | 7 | 7 | `cmd/content`; 2 writes behind the content gate. |
+| Screeners | `ScreenerContext` | 5 | 5 | `cmd/screener`, one `-action` per method. All read-only. |
+| Portfolios | `PortfolioContext` | 5 | 5 | `cmd/portfolio`, all read-only. |
+| Price alerts | `AlertContext` | 4 | 4 | `cmd/alert`; `List` is a read, 3 writes behind the alert gate. |
+| Assets | `AssetContext` | 2 | 2 | `cmd/fundamentals`. |
+| Calendar | `CalendarContext` | 1 | 1 | `cmd/fundamentals`. `cmd/market` also has `TradingDays` from `QuoteContext`. |
+| **Total** | **12 context types** | **153** | **153** | |
 
-The rule the omissions follow is simple: **this demo only calls a mutating
-method when that method sits behind its own complete gate.** `AlertContext` is
-currently the clearest case of something left alone — all four of its methods
-create or cancel a price alert, and no alert gate exists. `SharelistContext`
-and `ContentContext` used to be in that position and are no longer: their
-writes are now covered, each behind its own three-condition gate, so those
-contexts are fully covered.
+There is no longer any omission to explain, so the rule that used to govern
+them — "this demo only calls a mutating method when that method sits behind its
+own complete gate" — is now a description of *every* write in the repo rather
+than a justification for a gap. There are **24** guarded write methods across
+the six gates (4 order, 4 watchlist, 5 sharelist, 2 content, 6 DCA, 3 alert) and
+**0** uncovered methods. The last omission, `ScreenerContext`, was never a
+safety decision: all five screener methods are reads, and one of them
+(`Search`) is a `POST` that queries and mutates nothing. It is simply the newest
+addition.
+
+The earlier version of this section said `AlertContext` was uncovered because
+"all writes … would need its own third guard", and that `ScreenerContext` was
+uncovered. Both were wrong. `AlertContext` has a gate — `config.AlertGuard`, a
+`config.WriteGuard`, used by `cmd/alert` — and `AlertContext.List` is a plain
+`GET /v1/notify/reminders` read, not a write at all. `cmd/screener` now covers
+all five screener methods.
 
 ---
 
@@ -1349,20 +1661,25 @@ What *was* verified by execution:
 
 - `gofmt -l .` reports nothing.
 - `go build ./...` and `go vet ./...` both exit 0.
-- All fourteen binaries build; `-h` exits 0 with no credentials.
-- All fourteen exit **2** with a readable missing-credentials message listing all
+- The test suite passes: 118 test functions, 584 passing cases including
+  subtests, one helper-process test skipped. See [Development](#development).
+- All **fifteen** binaries build; `-h` exits 0 with no credentials.
+- All fifteen exit **2** with a readable missing-credentials message listing all
   three variables, and no panic.
+- A bad flag value exits **1**, not 2: `go run ./cmd/quote -period nonsense`
+  → 1, while unsetting the three credentials → 2. Verified for both.
 - With dummy credentials, every command reaches the real Longbridge API and
   fails with `httpStatus:401 code:401004 message:token invalid` — proving the
   config, signing and network path are genuinely wired, not stubbed. This was
   checked for all three `warrant` actions, `watchlist -action list`, all seven
-  read-only `executions` actions, all eleven `reference` sections, all fourteen
-  `market` sections, all three read-only `sharelist` actions, all five
-  read-only `content` actions, all five `portfolio` actions, all
-  **thirty-three** `fundamentals` actions, all five read-only `dca` actions
-  and `alert -action list`.
+  read-only `executions` actions, all **fifteen** `reference` sections, all
+  fourteen `market` sections, all three read-only `sharelist` actions, all five
+  read-only `content` actions, all five `portfolio` actions, all **thirty-six**
+  `fundamentals` actions, all five read-only `dca` actions,
+  `alert -action list`, and **all five `screener` actions** — each returns the
+  same real 401.
 - Every write path is blocked in each of the non-sending configurations, and
-  every refusal was confirmed to make **no** network call. The 26 sharelist
+  every refusal was confirmed to make **no** network call. The 28 sharelist
   and content write combinations all exit **3**.
 - The DCA and alert gates were swept exhaustively: **63 blocked cases** (6 DCA
   actions × 7 switch combinations, 3 alert actions × 7) each exit **3**, print
@@ -1375,9 +1692,19 @@ What *was* verified by execution:
 - A blocked write was measured at ~10ms against ~300ms for an equivalent
   unblocked write to the real gateway, which is the empirical evidence that a
   refusal dials nothing.
-- An unparseable `LONGPORT_DCA_DRY_RUN` or `LONGPORT_ALERT_DRY_RUN` is
-  rejected at startup, not silently treated as "on".
-- The static coverage check above finds no uncovered method.
+- An unparseable `LONGPORT_DRY_RUN`, `LONGPORT_WATCHLIST_DRY_RUN`,
+  `LONGPORT_DCA_DRY_RUN`, `LONGPORT_ALERT_DRY_RUN`,
+  `LONGPORT_SHARELIST_DRY_RUN` or `LONGPORT_CONTENT_DRY_RUN` is rejected at
+  startup, not silently treated as "on". The last two are now checked in
+  `config.Load` via `declaredGuards()`, so **every** command rejects them, not
+  only `cmd/sharelist` and `cmd/content`.
+- `-config ./config.yml` and `-config ./config.toml` both fail with the
+  explicit "this demo reads YAML only" error and exit **1**, even when the
+  environment has already supplied all three credentials.
+- The static coverage check above finds no uncovered method — and, unlike the
+  previous version of this claim, it now actually examines **all twelve**
+  context types. The old snippets used `\(c \*` and so silently skipped all 12
+  `MarketContext` methods; the check is receiver-agnostic now.
 
 **A 401 is a real answer, not a successful one.** It proves the request was
 built, signed and delivered, and rejected. It says nothing about the shape of a
@@ -1412,7 +1739,7 @@ Specifically verified about the guards:
 | `content` create-topic/reply | `CONTENT_DRY_RUN=0 --confirm-live-content` | **exit 3**, blocked (mode=simulated), no network |
 | `content` create-topic | `CONTENT_DRY_RUN=0 --confirm-live-content MODE=live` | reached the API (401 on the dummy token) |
 
-All 18 sharelist rows (5 actions × 4 non-sending switch combinations) and all
+All 20 sharelist rows (5 actions × 4 non-sending switch combinations) and all
 8 content rows (2 actions × 4) were checked and every one exited **3** with the
 intended request printed and nothing sent. The no-network claim was confirmed
 empirically rather than by inspection: with `LONGBRIDGE_HTTP_URL` pointed at
@@ -1421,6 +1748,22 @@ both returned exit 3 in under 10 ms, while a *read* through the same dead
 gateway failed with `dial tcp 127.0.0.1:1: connect: connection refused` — so
 the override was demonstrably in effect and the refusals demonstrably never
 touched it.
+
+`cmd/screener` is the newest command, so it is worth being precise about exactly
+how far it has been taken. All five actions were run against the real API with a
+deliberately invalid token and each returns the same real 401 as every other
+command — so the wiring, the flag validation, the mode banner and the request
+construction are confirmed. What is **not** confirmed is anything about a
+successful response. **Every one of the five responses is `json.RawMessage`** in
+the SDK (`screener/types.go` defines no response structs at all), so the
+renderer is a deterministic-key-order pretty-printer with a 4 KB clip, and its
+output was **written from the SDK's struct definitions alone and never observed
+from a live API**. The three behaviours documented under
+[`screener`](#screener--read-only-stock-screener) — the two-request search, the
+0-indexed page, the rejected `-strategy-id 0` — were read out of
+`screener/context.go`, not observed. In particular the two-request mode A could
+not be observed end to end, because the first `GET` is rejected by the dummy
+token before the second `POST` is ever issued; the claim rests on the SDK source.
 
 What is **not** verified: the shape of successful responses, field-by-field
 rendering, column widths, and whether any live order is accepted. No command
@@ -1480,9 +1823,104 @@ would have treated a refusal as a completed order. Guard refusals now return a
 `*config.BlockedError` and `cli.Fail` maps it to **exit 3** in every guarded
 command. See "Exit codes" under Configuration reference.
 
-There is no automated test suite. There should be — the config loader and both
-guards in particular are testable without credentials and are the natural
-first target.
+A second wrinkle, also now **fixed**: the order gate's mode test was
+`Mode == ModeSimulated`, which let an unknown or empty mode through. It is now
+`Mode != ModeLive`, fail-closed. See
+[the mode test is fail-closed](#the-mode-test-is-fail-closed).
+
+And a third: `cmd/sharelist` and `cmd/content` used to call `os.Exit(3)` from
+inside their own gate helpers, duplicating the refusal machinery. Both are now
+`config.WriteGuard` values, and their gates `return Blockedf(...)` so the
+refusal reaches `cli.Fail` by the same path as every other gate. The exit code
+is unchanged at 3; the *mechanism* is now shared, which is what makes
+`declaredGuards()` able to validate all four `WriteGuard` switches in
+`config.Load` at startup.
+
+An earlier version of this README said there was no automated test suite. That
+is no longer true, and it was never true of the parts that matter most. See
+[Development](#development).
+
+---
+
+## Development
+
+There is a test suite. It covers the two packages where a mistake is silent and
+dangerous — `internal/config` (the loader and all six gates) and `internal/cli`
+(the exit-code mapping).
+
+```bash
+go test ./...                                        # everything
+go test -race ./...                                  # the same, with the race detector
+go test -cover ./internal/...                        # coverage per package
+go test -shuffle=on ./internal/config/               # order independence
+go test -run 'Gate|Unsafe|Unknown' ./internal/config/ -v
+```
+
+There is **no `make test` target** in this repo's `Makefile` — use `go test`
+directly, or `make all` for `fmt + vet + build`. (The sibling `tiger-go-demo`
+does have `make test`; the two Makefiles are not kept in step.)
+
+| Package | Test functions | Statement coverage |
+| --- | --- | --- |
+| `internal/config` | 81 | **100.0%** |
+| `internal/cli` | 37 | **98.6%** |
+| **Total** | **118** | — |
+
+That is 118 test functions expanding to **584 passing cases** including
+subtests (one `TestHelperProcess` is a subprocess helper and is skipped
+normally). The `cmd/*` packages have no tests — they are thin flag-and-print
+shells over the SDK, and the interesting logic they contain is the flag
+validation, which is checked by running them with bad flags and reading the exit
+code.
+
+The suite runs with **no credentials and no network**, and that is enforced
+rather than assumed:
+
+- **Hermetic under `-shuffle`.** Every test in `internal/config` calls a
+  `sandbox(t)` helper that gives it a private `t.TempDir()` working directory
+  and clears all 24 `LONGBRIDGE_*` / `LONGPORT_*` variables the package or the
+  SDK reads, then restores the previous state on cleanup. There are no
+  `t.Parallel()` tests, because `t.Setenv` and `t.Chdir` forbid them.
+- **Immune to a polluted shell.** The suite was run with
+  `LONGBRIDGE_APP_KEY=leak LONGBRIDGE_APP_SECRET=leak LONGBRIDGE_ACCESS_TOKEN=leak
+  LONGPORT_MODE=bogus LONGPORT_DRY_RUN=maybe LONGPORT_DCA_DRY_RUN=maybe …` in
+  the environment and still passed. `sandbox(t)` unsets everything, and
+  `restoreEnv` puts it back, including the variables `applyEnvOverrides` writes
+  directly with `os.Setenv` and which would therefore outlive `t.Setenv`.
+- **Immune to a stray `config.yaml`.** A real `config.yaml` with credentials
+  was dropped in the repository root and the suite still passed, because
+  `sandbox(t)` changes into a temp directory first.
+
+What the tests actually pin, in rough order of value:
+
+- The **exit-code mapping** in `cli.Fail` — 0/1/2/3, and specifically that a
+  `flag` parse error is **1** while only a `MissingCredentialError` is **2**.
+  The mapping is also executed for real, by re-running the test binary as a
+  subprocess and checking the actual exit status.
+- **Every gate's refusal is fail-closed**: unset and unparseable
+  `*_DRY_RUN` both mean "dry run", a missing flag refuses even with the env
+  cleared and vice versa, an unknown `Mode` refuses, and `GuardWrite` with an
+  empty action is a plain error rather than a refusal.
+- **The four `WriteGuard` values are asserted field by field** in
+  `TestDeclaredGuards`, plus set-level invariants (no two gates may share a
+  switch, and `declaredGuards()` and the test must list the same number of
+  gates). So editing `DCAGuard.RequireLive`, or adding a fifth gate in one place
+  and not the other, fails the suite immediately. Go offers no constant structs
+  and therefore no compile-time freeze, and this is the closest available
+  substitute.
+- **The credential precedence rules**: environment beats file, canonical
+  `LONGBRIDGE_*` beats deprecated `LONGPORT_*`, and the error message lists
+  *every* missing variable rather than the first.
+- **The YAML-only config rule**: the candidate list is exactly
+  `config.yaml`, `config.local.yaml`; a `.yml` or `.toml` explicit path is
+  rejected, and the extension is checked *before* the file is stat'ed.
+- **Formatting helpers** in `cli`: `Dec`/`Dec4` render `nil` as `-` and zero as a
+  real figure, `Truncate` never emits a broken rune, `Redact` does not leak the
+  length of a long secret.
+
+The two guards most likely to be wrong in a way a test would catch — the order
+gate and the reusable `WriteGuard` — are the two with the most table-driven
+cases.
 
 ---
 
@@ -1499,8 +1937,20 @@ Center, not an OAuth token; (2) all three values are from the *same* account
 token has not been revoked. Turn on `LONGBRIDGE_LOG_LEVEL=debug` for detail.
 
 **`Longbridge config is not exist in yaml file`** — the YAML is missing the
-top-level `longbridge:` key, or the file extension is not `.yaml`/`.yml`
-(the SDK infers the format from the extension).
+top-level `longbridge:` key, or the file extension is not one the SDK's
+`configTypeMap` knows (`.env`, `.yaml`, `.toml` — note **not** `.yml`). In
+practice you should not be able to hit this through `-config`, because a
+non-`.yaml` explicit path is rejected earlier with a clearer message (see
+below); you would have to reach the SDK's own parser some other way.
+
+**`config file "./x.yml": this demo reads YAML only …`** — you passed a `.yml`
+or `.toml` path to `-config`. That is a hard error, exit **1**, and it is
+deliberate: the SDK cannot parse `.yml` at all, and this loader's own
+credential top-up is YAML-only, so advertising a filename it cannot honour
+would either break startup or silently supply no credential. Convert the file
+(see `config.example.yaml`), rename it to `.yaml`, or set the three
+`LONGBRIDGE_*` variables in the environment. See
+[Config files: YAML only](#config-files-yaml-only-and-why).
 
 **`config file "./x.yaml": no such file or directory`** — an explicit
 `-config` path does not exist. This is intentional, so a typo cannot silently
@@ -1541,6 +1991,7 @@ longbridge-go-demo/
 │   ├── portfolio/main.go   exchange rates and P&L analytics
 │   ├── dca/main.go         DCA plans: 5 reads + 6 gated plan changes
 │   ├── alert/main.go       price alerts: 1 read + 3 gated changes
+│   ├── screener/main.go    the 5 screener methods, all read-only
 │   └── fundamentals/       the 32 fundamental methods, + asset & calendar
 │       ├── main.go         flags, validation, action dispatch
 │       └── actions.go      one renderer per SDK method
@@ -1548,15 +1999,22 @@ longbridge-go-demo/
 │   ├── config/             env + YAML loader, mode/dry-run switch, redaction
 │   │   ├── config.go       credentials, LONGPORT_MODE, order gate
 │   │   ├── guard.go        the separate watchlist gate; exit-3 refusal type
-│   │   ├── writeguard.go   the reusable WriteGuard behind the dca/alert gates
-│   │   └── file.go
+│   │   ├── writeguard.go   the reusable WriteGuard behind the dca/alert/sharelist/content gates
+│   │   ├── file.go         YAML-only credential file loader
+│   │   └── *_test.go       81 test functions, 100% statement coverage
 │   └── cli/                shared flag parsing, credential errors, panic guard
+│       ├── cli.go
+│       ├── cli_test.go     26 test functions
+│       └── fail_test.go    11 test functions, incl. real subprocess exit codes
 ├── .env.example            every LONGPORT_*/LONGBRIDGE_* var, fully commented
 ├── config.example.yaml     YAML template, `longbridge:` block
-├── Makefile                build, fmt, fmt-check, vet, tidy
+├── Makefile                build, fmt, fmt-check, vet, tidy  (no `test` target)
 ├── go.mod / go.sum
 └── README.md
 ```
+
+Fifteen `cmd/` directories, fifteen `binaries` in the `Makefile`'s `BINARIES`
+list, and fifteen `run-*` targets.
 
 ### A note on the module path
 
