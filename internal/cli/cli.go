@@ -42,7 +42,10 @@ func Fail(err error) {
 	}
 	var missing *appcfg.MissingCredentialError
 	if errors.As(err, &missing) {
-		fmt.Fprintf(os.Stderr, "error: %s\n", missing.Error())
+		// err, not missing: a caller that wrapped the error for context
+		// ("loading config from %s") would otherwise lose that prefix, since
+		// %v on the wrapper already spells out the reason.
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(2)
 	}
 	fmt.Fprintf(os.Stderr, "error: %v\n", err)
@@ -98,6 +101,10 @@ func NewUsage(name, summary string) *Usage {
 		fmt.Fprintf(out, "                              Needs LONGPORT_MODE=live too; see cmd/dca.\n")
 		fmt.Fprintf(out, "  LONGPORT_ALERT_DRY_RUN        1/true (default) blocks price-alert writes.\n")
 		fmt.Fprintf(out, "                              Needs LONGPORT_MODE=live too; see cmd/alert.\n")
+		fmt.Fprintf(out, "  LONGPORT_SHARELIST_DRY_RUN   1/true (default) blocks sharelist writes.\n")
+		fmt.Fprintf(out, "                              Needs LONGPORT_MODE=live too; see cmd/sharelist.\n")
+		fmt.Fprintf(out, "  LONGPORT_CONTENT_DRY_RUN     1/true (default) blocks content publishes.\n")
+		fmt.Fprintf(out, "                              Needs LONGPORT_MODE=live too; see cmd/content.\n")
 		fmt.Fprintf(out, "\nExit codes: 0 ok, 1 error, 2 missing credentials, 3 BLOCKED by a guard.\n")
 		fmt.Fprintf(out, "\nSee README.md for the simulated-account walkthrough.\n")
 	}
