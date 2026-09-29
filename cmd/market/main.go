@@ -223,7 +223,137 @@ func printStatus(ctx context.Context, mc *market.MarketContext) error {
 			m.Market, m.TradeStatus.Code(), label, m.TradeStatus.IsTrading(),
 			delayLabel, m.DelayTradeStatus.IsTrading(), m.SubStatus, m.DelaySubStatus)
 	}
+	fmt.Println("\nPredicates")
+	for _, m := range st.MarketTime {
+		for _, line := range statusDetailLines(m) {
+			fmt.Println(line)
+		}
+	}
 	return nil
+}
+
+// statusAbsent reports whether a status means "the API supplied none", as
+// opposed to "the API supplied this one and it says the market is shut".
+//
+// TradeStatus is a bare int32, so the two are not distinguishable by type: the
+// SDK decodes a missing JSON field as 0 and an unrecognised code as -1 (see
+// MarketContext.MarketStatus, which routes both through TradeStatusFromCode).
+// Code 0 and code -1 are the SDK's own "no status" codes — NoRegisterQuote and
+// Unknown — and Label() is empty for both.
+//
+// WHY NOT PRINT THE PREDICATES ANYWAY: they are not a row of falses, which is
+// what makes it worse. IsSpecial() is true for every code below 100, so an
+// absent status renders as "special" — a halted, suspended, delisted or
+// unlisted market. On a section whose entire subject is whether it is safe to
+// trade, inventing an answer for a market we know nothing about is the one
+// failure worth going out of the way to avoid, so the line is printed as a
+// dash and says the status was not supplied.
+func statusAbsent(s market.TradeStatus) bool {
+	switch s {
+	case market.TradeStatusNoRegisterQuote, market.TradeStatusUnknown:
+		return true
+	}
+	return false
+}
+
+// statusFlag is one rendered predicate: the group it belongs to, the SDK method
+// it came from, that method's answer, and what the method actually tests.
+type statusFlag struct {
+	group string
+	name  string
+	value string
+	note  string
+}
+
+// statusFlags returns the TradeStatus predicates, grouped by the question each
+// one answers rather than alphabetically, because the relationships between
+// them are the interesting part.
+//
+// Code() and Label() are not here: the table above already shows both. IsTrading
+// is, deliberately — it is in the table, but the table has one column for two
+// different statuses (live and delay) and a block that omitted the answer would
+// be the block a reader trusts least. Each block is self-contained.
+//
+// The notes deliberately do not restate the SDK's code lists: those would be a
+// second copy of market/trade_status.go to go stale silently. The real code is
+// printed next to every block and the tests pin each predicate against the SDK
+// constants, so a predicate that changes meaning fails the build rather than
+// quietly printing a wrong note.
+//
+// On the overlaps, since a reader will assume they are mistakes:
+//
+//   - IsUSPrePost is not independent of IsUSPreMarket and IsUSPostMarket; the
+//     SDK defines it as exactly their disjunction, so it is printed for the
+//     shape of the answer ("neither regular nor closed") and asserted as such.
+//   - IsUSClosing is IsClosing restricted to the US codes, so it is never true
+//     when IsClosing is false. It is still printed: it is the answer to "is the
+//     *US* session closed", which IsClosing alone does not give.
+//   - IsDark is a venue, not a session: a dark status is simultaneously not
+//     IsTrading and not IsClosing, which is why both false and IsDark true is
+//     a real combination rather than a contradiction.
+//   - IsSpecial is a code-range test, not the complement of the rest: a US
+//     halted market is both IsUSMarket and IsSpecial.
+//
+// String() is deliberately absent: its body is `return s.Name()`, so printing it
+// would print Name() under a second name. The full name is in the block header
+// via Name(), which also fills the gap Label() leaves for the codes it declines
+// to label (dark, auctions, breaks) — where the table above shows "-".
+func statusFlags(s market.TradeStatus) []statusFlag {
+	normalized := s.Normalize()
+	aliasNote := "already a display status"
+	if normalized != s {
+		aliasNote = "quote-engine alias, folded for display"
+	}
+	return []statusFlag{
+		{"session", "IsTrading", yn(s.IsTrading()), "regular trading hours"},
+		{"session", "AllowTrading", yn(s.AllowTrading()), "orders accepted here"},
+		{"us hours", "IsUSMarket", yn(s.IsUSMarket()), "code is in the US 200s"},
+		{"us hours", "IsUSPrePost", yn(s.IsUSPrePost()), "= IsUSPreMarket || IsUSPostMarket"},
+		{"us hours", "IsUSPreMarket", yn(s.IsUSPreMarket()), "US extended, before the open"},
+		{"us hours", "IsUSPostMarket", yn(s.IsUSPostMarket()), "US extended, after the close"},
+		{"us hours", "IsUSNight", yn(s.IsUSNight()), "US overnight session"},
+		{"closed", "IsClosing", yn(s.IsClosing()), "session is over"},
+		{"closed", "IsUSClosing", yn(s.IsUSClosing()), "US session is over"},
+		{"other", "IsDark", yn(s.IsDark()), "dark pool, not a session"},
+		{"other", "IsSpecial", yn(s.IsSpecial()), "halt, suspension, listing or out-of-range code"},
+		{"other", "Normalize", fmt.Sprintf("%d", normalized.Code()), aliasNote},
+	}
+}
+
+// statusStatusLines renders one market's status: the live one and the delayed
+// one are rendered by the same code from the same template, so the two blocks
+// differ only in which field they read. They are kept as separate blocks
+// because the delay status is a different question — what a delayed subscriber
+// sees — and printing one in place of the other would be the whole answer
+// wrong rather than partly wrong.
+func statusStatusLines(mkt, what string, s market.TradeStatus) []string {
+	if statusAbsent(s) {
+		return []string{fmt.Sprintf("  %-4s %s: - (no status supplied, code %d)", mkt, what, s.Code())}
+	}
+	lines := []string{fmt.Sprintf("  %-4s %s: code %d (%s)", mkt, what, s.Code(), s.Name())}
+	group := ""
+	for _, f := range statusFlags(s) {
+		if f.group != group {
+			lines = append(lines, fmt.Sprintf("    %s", f.group))
+			group = f.group
+		}
+		lines = append(lines, fmt.Sprintf("      %-15s %-6s %s", f.name, f.value, f.note))
+	}
+	return lines
+}
+
+func statusDetailLines(item market.MarketTimeItem) []string {
+	return append(
+		statusStatusLines(item.Market, "status", item.TradeStatus),
+		statusStatusLines(item.Market, "delay status", item.DelayTradeStatus)...,
+	)
+}
+
+func yn(b bool) string {
+	if b {
+		return "true"
+	}
+	return "false"
 }
 
 func printCalendar(ctx context.Context, qc *quote.QuoteContext) error {

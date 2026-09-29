@@ -713,3 +713,819 @@ func TestPrintAhPremium_RejectsABadPeriodBeforeUsingTheClient(t *testing.T) {
 		}
 	}
 }
+
+// ------------------------------------------------------- trade status flags
+//
+// Every predicate here is a pure function of a TradeStatus value with no
+// receiver state, so the whole matrix is assertable from hand-built statuses —
+// no client, no fixtures, no network. Two things are worth pinning, and they are
+// different things:
+//
+//   - what each predicate answers, for every state the SDK can produce. The
+//     section prints these, so a predicate that quietly changes meaning turns
+//     the output into a lie, and the tests are the only thing that notices.
+//   - which of them are *defined* in terms of each other. Those are asserted as
+//     identities over the whole code range rather than per state, because that
+//     is what the SDK source actually guarantees. Nothing here asserts a
+//     relationship the source does not state; where two predicates merely happen
+//     to agree on today's constants, the table records the pair and no identity
+//     is claimed.
+
+const (
+	flagIsTrading    = "IsTrading"
+	flagAllowTrading = "AllowTrading"
+	flagIsUSMarket   = "IsUSMarket"
+	flagIsUSPrePost  = "IsUSPrePost"
+	flagIsUSPre      = "IsUSPreMarket"
+	flagIsUSPost     = "IsUSPostMarket"
+	flagIsUSNight    = "IsUSNight"
+	flagIsClosing    = "IsClosing"
+	flagIsUSClosing  = "IsUSClosing"
+	flagIsDark       = "IsDark"
+	flagIsSpecial    = "IsSpecial"
+	flagNormalize    = "Normalize"
+)
+
+// tradeStatusCodeRange is the sweep used by the identity tests. Every constant
+// in the SDK's code table is inside it, including the two below 0, and it is
+// wide enough that a constant added near either end of the table would be
+// swept rather than skipped.
+const (
+	tradeStatusSweepLo = -2000
+	tradeStatusSweepHi = 3000
+)
+
+// statusFlagSet is the rendered flag list for one status: each SDK method by
+// name and the boolean it returned (Normalize is not a predicate, so it has no
+// entry here and is covered by its own test).
+func statusFlagSet(s market.TradeStatus) map[string]bool {
+	return map[string]bool{
+		flagIsTrading:    s.IsTrading(),
+		flagAllowTrading: s.AllowTrading(),
+		flagIsUSMarket:   s.IsUSMarket(),
+		flagIsUSPrePost:  s.IsUSPrePost(),
+		flagIsUSPre:      s.IsUSPreMarket(),
+		flagIsUSPost:     s.IsUSPostMarket(),
+		flagIsUSNight:    s.IsUSNight(),
+		flagIsClosing:    s.IsClosing(),
+		flagIsUSClosing:  s.IsUSClosing(),
+		flagIsDark:       s.IsDark(),
+		flagIsSpecial:    s.IsSpecial(),
+	}
+}
+
+func TestTradeStatusPredicates_EachStateAnswersEveryPredicate(t *testing.T) {
+	tests := []struct {
+		name   string
+		status market.TradeStatus
+		want   map[string]bool
+	}{
+		{
+			name:   "US pre-market",
+			status: market.TradeStatusUSPrev,
+			want: map[string]bool{
+				flagIsTrading: false, flagAllowTrading: false, flagIsUSMarket: true,
+				flagIsUSPrePost: true, flagIsUSPre: true, flagIsUSPost: false,
+				flagIsUSNight: false, flagIsClosing: false, flagIsUSClosing: false,
+				flagIsDark: false, flagIsSpecial: false,
+			},
+		},
+		{
+			// 206 is the quote engine's spelling of 201, but the predicates read
+			// the raw value, so it must look like a pre-market all the same.
+			name:   "US clearing+pre-market alias",
+			status: market.TradeStatusUSClean,
+			want: map[string]bool{
+				flagIsTrading: false, flagAllowTrading: false, flagIsUSMarket: true,
+				flagIsUSPrePost: true, flagIsUSPre: true, flagIsUSPost: false,
+				flagIsUSNight: false, flagIsClosing: false, flagIsUSClosing: false,
+				flagIsDark: false, flagIsSpecial: false,
+			},
+		},
+		{
+			name:   "US regular session",
+			status: market.TradeStatusUSTrading,
+			want: map[string]bool{
+				flagIsTrading: true, flagAllowTrading: true, flagIsUSMarket: true,
+				flagIsUSPrePost: false, flagIsUSPre: false, flagIsUSPost: false,
+				flagIsUSNight: false, flagIsClosing: false, flagIsUSClosing: false,
+				flagIsDark: false, flagIsSpecial: false,
+			},
+		},
+		{
+			name:   "US post-market clearing alias",
+			status: market.TradeStatusUSAfterMarketClean,
+			want: map[string]bool{
+				flagIsTrading: true, flagAllowTrading: true, flagIsUSMarket: true,
+				flagIsUSPrePost: false, flagIsUSPre: false, flagIsUSPost: false,
+				flagIsUSNight: false, flagIsClosing: false, flagIsUSClosing: false,
+				flagIsDark: false, flagIsSpecial: false,
+			},
+		},
+		{
+			name:   "US post-market",
+			status: market.TradeStatusUSAfter,
+			want: map[string]bool{
+				flagIsTrading: false, flagAllowTrading: false, flagIsUSMarket: true,
+				flagIsUSPrePost: true, flagIsUSPre: false, flagIsUSPost: true,
+				flagIsUSNight: false, flagIsClosing: false, flagIsUSClosing: false,
+				flagIsDark: false, flagIsSpecial: false,
+			},
+		},
+		{
+			name:   "US overnight",
+			status: market.TradeStatusUSNight,
+			want: map[string]bool{
+				flagIsTrading: false, flagAllowTrading: false, flagIsUSMarket: true,
+				// Overnight is neither pre nor post as the SDK defines them,
+				// so IsUSPrePost is false here even though the market is open
+				// for extended hours. This is the row that would look like a
+				// bug if it were not printed and pinned.
+				flagIsUSPrePost: false, flagIsUSPre: false, flagIsUSPost: false,
+				flagIsUSNight: true, flagIsClosing: false, flagIsUSClosing: false,
+				flagIsDark: false, flagIsSpecial: false,
+			},
+		},
+		{
+			name:   "US closed",
+			status: market.TradeStatusUSClosing,
+			want: map[string]bool{
+				flagIsTrading: false, flagAllowTrading: false, flagIsUSMarket: true,
+				flagIsUSPrePost: false, flagIsUSPre: false, flagIsUSPost: false,
+				flagIsUSNight: false, flagIsClosing: true, flagIsUSClosing: true,
+				flagIsDark: false, flagIsSpecial: false,
+			},
+		},
+		{
+			name:   "US pre-market clearing alias",
+			status: market.TradeStatusUSPrevMarketClean,
+			want: map[string]bool{
+				flagIsTrading: false, flagAllowTrading: false, flagIsUSMarket: true,
+				flagIsUSPrePost: false, flagIsUSPre: false, flagIsUSPost: false,
+				flagIsUSNight: false, flagIsClosing: true, flagIsUSClosing: true,
+				flagIsDark: false, flagIsSpecial: false,
+			},
+		},
+		{
+			// The one state that separates IsClosing from IsUSClosing in the
+			// other direction: closed, but not a US close.
+			name:   "half-day close",
+			status: market.TradeStatusHalfClosing,
+			want: map[string]bool{
+				flagIsTrading: false, flagAllowTrading: false, flagIsUSMarket: false,
+				flagIsUSPrePost: false, flagIsUSPre: false, flagIsUSPost: false,
+				flagIsUSNight: false, flagIsClosing: true, flagIsUSClosing: false,
+				flagIsDark: false, flagIsSpecial: false,
+			},
+		},
+		{
+			name:   "US halted",
+			status: market.TradeStatusUSStop,
+			want: map[string]bool{
+				// A US market and a special status at once: IsSpecial is a
+				// code-range test with an explicit halt, not "not regular".
+				flagIsTrading: false, flagAllowTrading: false, flagIsUSMarket: true,
+				flagIsUSPrePost: false, flagIsUSPre: false, flagIsUSPost: false,
+				flagIsUSNight: false, flagIsClosing: false, flagIsUSClosing: false,
+				flagIsDark: false, flagIsSpecial: true,
+			},
+		},
+		{
+			name:   "regular session",
+			status: market.TradeStatusTrading,
+			want: map[string]bool{
+				flagIsTrading: true, flagAllowTrading: true, flagIsUSMarket: false,
+				flagIsUSPrePost: false, flagIsUSPre: false, flagIsUSPost: false,
+				flagIsUSNight: false, flagIsClosing: false, flagIsUSClosing: false,
+				flagIsDark: false, flagIsSpecial: false,
+			},
+		},
+		{
+			// The pair that separates IsTrading from AllowTrading: an auction is
+			// order-accepting but not regular trading.
+			name:   "opening auction",
+			status: market.TradeStatusOpenBid,
+			want: map[string]bool{
+				flagIsTrading: false, flagAllowTrading: true, flagIsUSMarket: false,
+				flagIsUSPrePost: false, flagIsUSPre: false, flagIsUSPost: false,
+				flagIsUSNight: false, flagIsClosing: false, flagIsUSClosing: false,
+				flagIsDark: false, flagIsSpecial: false,
+			},
+		},
+		{
+			name:   "mid-day break",
+			status: market.TradeStatusNoonClosing,
+			want: map[string]bool{
+				// Orders are still accepted during the break, so IsTrading
+				// false + AllowTrading true is a real state, not a contradiction.
+				flagIsTrading: false, flagAllowTrading: true, flagIsUSMarket: false,
+				flagIsUSPrePost: false, flagIsUSPre: false, flagIsUSPost: false,
+				flagIsUSNight: false, flagIsClosing: false, flagIsUSClosing: false,
+				flagIsDark: false, flagIsSpecial: false,
+			},
+		},
+		{
+			name:   "closing auction",
+			status: market.TradeStatusCloseBid,
+			want: map[string]bool{
+				flagIsTrading: false, flagAllowTrading: true, flagIsUSMarket: false,
+				flagIsUSPrePost: false, flagIsUSPre: false, flagIsUSPost: false,
+				flagIsUSNight: false, flagIsClosing: false, flagIsUSClosing: false,
+				flagIsDark: false, flagIsSpecial: false,
+			},
+		},
+		{
+			name:   "waiting to open under special conditions",
+			status: market.TradeStatusNotOpened,
+			want: map[string]bool{
+				flagIsTrading: false, flagAllowTrading: true, flagIsUSMarket: false,
+				flagIsUSPrePost: false, flagIsUSPre: false, flagIsUSPost: false,
+				flagIsUSNight: false, flagIsClosing: false, flagIsUSClosing: false,
+				flagIsDark: false, flagIsSpecial: false,
+			},
+		},
+		{
+			// Name() says "Closed" and IsClosing() says false: 101 is the
+			// alias that normalises to 108, and the predicates read the raw
+			// code. Printed side by side, that disagreement is visible instead
+			// of being something a reader has to guess at.
+			name:   "clearing before the open",
+			status: market.TradeStatusClean,
+			want: map[string]bool{
+				flagIsTrading: false, flagAllowTrading: false, flagIsUSMarket: false,
+				flagIsUSPrePost: false, flagIsUSPre: false, flagIsUSPost: false,
+				flagIsUSNight: false, flagIsClosing: false, flagIsUSClosing: false,
+				flagIsDark: false, flagIsSpecial: false,
+			},
+		},
+		{
+			name:   "closed",
+			status: market.TradeStatusClosing,
+			want: map[string]bool{
+				flagIsTrading: false, flagAllowTrading: false, flagIsUSMarket: false,
+				flagIsUSPrePost: false, flagIsUSPre: false, flagIsUSPost: false,
+				flagIsUSNight: false, flagIsClosing: true, flagIsUSClosing: false,
+				flagIsDark: false, flagIsSpecial: false,
+			},
+		},
+		{
+			name:   "dark wait",
+			status: market.TradeStatusDarkWait,
+			want: map[string]bool{
+				flagIsTrading: false, flagAllowTrading: false, flagIsUSMarket: false,
+				flagIsUSPrePost: false, flagIsUSPre: false, flagIsUSPost: false,
+				flagIsUSNight: false, flagIsClosing: false, flagIsUSClosing: false,
+				flagIsDark: true, flagIsSpecial: false,
+			},
+		},
+		{
+			name:   "dark trading",
+			status: market.TradeStatusDarkTrading,
+			want: map[string]bool{
+				// Dark and trading, but not IsTrading — the venue is what the
+				// predicate is about.
+				flagIsTrading: false, flagAllowTrading: false, flagIsUSMarket: false,
+				flagIsUSPrePost: false, flagIsUSPre: false, flagIsUSPost: false,
+				flagIsUSNight: false, flagIsClosing: false, flagIsUSClosing: false,
+				flagIsDark: true, flagIsSpecial: false,
+			},
+		},
+		{
+			name:   "dark closed",
+			status: market.TradeStatusDarkClosing,
+			want: map[string]bool{
+				flagIsTrading: false, flagAllowTrading: false, flagIsUSMarket: false,
+				flagIsUSPrePost: false, flagIsUSPre: false, flagIsUSPost: false,
+				flagIsUSNight: false, flagIsClosing: false, flagIsUSClosing: false,
+				flagIsDark: true, flagIsSpecial: false,
+			},
+		},
+		{
+			name:   "after-hours fixed price",
+			status: market.TradeStatusAfterFix,
+			want: map[string]bool{
+				flagIsTrading: false, flagAllowTrading: false, flagIsUSMarket: false,
+				flagIsUSPrePost: false, flagIsUSPre: false, flagIsUSPost: false,
+				flagIsUSNight: false, flagIsClosing: false, flagIsUSClosing: false,
+				flagIsDark: false, flagIsSpecial: false,
+			},
+		},
+		{
+			name:   "temporary intraday break",
+			status: market.TradeStatusRealtimeQuote,
+			want: map[string]bool{
+				flagIsTrading: false, flagAllowTrading: false, flagIsUSMarket: false,
+				flagIsUSPrePost: false, flagIsUSPre: false, flagIsUSPost: false,
+				flagIsUSNight: false, flagIsClosing: false, flagIsUSClosing: false,
+				flagIsDark: false, flagIsSpecial: false,
+			},
+		},
+		{
+			name:   "delisted",
+			status: market.TradeStatusDelist,
+			want: map[string]bool{
+				flagIsTrading: false, flagAllowTrading: false, flagIsUSMarket: false,
+				flagIsUSPrePost: false, flagIsUSPre: false, flagIsUSPost: false,
+				flagIsUSNight: false, flagIsClosing: false, flagIsUSClosing: false,
+				flagIsDark: false, flagIsSpecial: true,
+			},
+		},
+		{
+			name:   "halted",
+			status: market.TradeStatusStop,
+			want: map[string]bool{
+				flagIsTrading: false, flagAllowTrading: false, flagIsUSMarket: false,
+				flagIsUSPrePost: false, flagIsUSPre: false, flagIsUSPost: false,
+				flagIsUSNight: false, flagIsClosing: false, flagIsUSClosing: false,
+				flagIsDark: false, flagIsSpecial: true,
+			},
+		},
+		{
+			name:   "quote not registered",
+			status: market.TradeStatusNoRegisterQuote,
+			want: map[string]bool{
+				// No predicate is true except IsSpecial, which is a code-range
+				// test and so says "special" about a status we do not have.
+				// This is why an absent status is not printed as flags.
+				flagIsTrading: false, flagAllowTrading: false, flagIsUSMarket: false,
+				flagIsUSPrePost: false, flagIsUSPre: false, flagIsUSPost: false,
+				flagIsUSNight: false, flagIsClosing: false, flagIsUSClosing: false,
+				flagIsDark: false, flagIsSpecial: true,
+			},
+		},
+		{
+			name:   "unknown code",
+			status: market.TradeStatusUnknown,
+			want: map[string]bool{
+				flagIsTrading: false, flagAllowTrading: false, flagIsUSMarket: false,
+				flagIsUSPrePost: false, flagIsUSPre: false, flagIsUSPost: false,
+				flagIsUSNight: false, flagIsClosing: false, flagIsUSClosing: false,
+				flagIsDark: false, flagIsSpecial: true,
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := statusFlagSet(tt.status)
+			for _, name := range []string{
+				flagIsTrading, flagAllowTrading, flagIsUSMarket, flagIsUSPrePost,
+				flagIsUSPre, flagIsUSPost, flagIsUSNight, flagIsClosing,
+				flagIsUSClosing, flagIsDark, flagIsSpecial,
+			} {
+				want, ok := tt.want[name]
+				if !ok {
+					t.Fatalf("test case %q has no expectation for %s", tt.name, name)
+				}
+				if got[name] != want {
+					t.Errorf("%s(code %d).%s = %v, want %v", tt.name, tt.status.Code(), name, got[name], want)
+				}
+			}
+		})
+	}
+}
+
+// The two identities the SDK's source actually defines, swept over every code
+// in and around the SDK's table rather than over the handful of states above:
+// a new constant landing between two of them would otherwise be unchecked.
+func TestTradeStatusPredicates_OverlappingPredicatesAgreeByDefinition(t *testing.T) {
+	for code := tradeStatusSweepLo; code <= tradeStatusSweepHi; code++ {
+		s := market.TradeStatusFromCode(int32(code))
+		if s.IsUSPrePost() != (s.IsUSPreMarket() || s.IsUSPostMarket()) {
+			t.Errorf("code %d: IsUSPrePost = %v, but IsUSPreMarket || IsUSPostMarket = %v",
+				code, s.IsUSPrePost(), s.IsUSPreMarket() || s.IsUSPostMarket())
+		}
+		// IsClosing's body lists every code IsUSClosing lists, plus two, so
+		// IsUSClosing can never be true while IsClosing is false.
+		if s.IsUSClosing() && !s.IsClosing() {
+			t.Errorf("code %d: IsUSClosing = true while IsClosing = false", code)
+		}
+	}
+}
+
+// The reverse of the previous identity is *not* an SDK guarantee and is
+// deliberately not asserted as one: a state could be added to IsClosing without
+// being a US close. What is asserted is that the two can disagree in that
+// direction today, so nobody later "fixes" the output by printing IsClosing
+// under the IsUSClosing heading.
+func TestTradeStatusPredicates_IsClosingCanBeTrueWhileIsUSClosingIsFalse(t *testing.T) {
+	for _, s := range []market.TradeStatus{market.TradeStatusClosing, market.TradeStatusHalfClosing} {
+		if !s.IsClosing() {
+			t.Errorf("code %d: IsClosing = false, want true", s.Code())
+		}
+		if s.IsUSClosing() {
+			t.Errorf("code %d: IsUSClosing = true, want false; the two are no longer distinguishable", s.Code())
+		}
+	}
+}
+
+// A code that the SDK does not define must not answer any session question.
+// This is the shape of the absent case with a positive code attached, and it is
+// why a 4xx the SDK later adds is a "no status" rather than a wrong one.
+func TestTradeStatusPredicates_UnrecognisedCodeIsSpecialButNotTrading(t *testing.T) {
+	for _, code := range []int32{456, 999, 3, 100} {
+		s := market.TradeStatusFromCode(code)
+		if !s.IsSpecial() {
+			t.Errorf("code %d: IsSpecial = false, want true", code)
+		}
+		if s.IsTrading() || s.AllowTrading() || s.IsClosing() || s.IsDark() {
+			t.Errorf("code %d: answers a session question for a status the SDK does not define", code)
+		}
+	}
+}
+
+// Normalize is not a predicate but is printed, so its output is pinned against
+// the SDK's own alias table: the header shows the raw code and the line shows
+// where it folds to, and a reader comparing the two needs them to be the codes
+// the SDK would use.
+func TestStatusFlags_NormalizePrintsTheFoldedCodeAndSaysWhetherItMoved(t *testing.T) {
+	tests := []struct {
+		status    market.TradeStatus
+		wantValue string
+		wantMoved bool
+	}{
+		{market.TradeStatusUSTrading, "202", false},
+		{market.TradeStatusUSAfterMarketClean, "202", true},
+		{market.TradeStatusUSClean, "201", true},
+		{market.TradeStatusUSPrevMarketClean, "204", true},
+		{market.TradeStatusClean, "108", true},
+		{market.TradeStatusUSNight, "207", false},
+	}
+	for _, tt := range tests {
+		flags := statusFlags(tt.status)
+		var got *statusFlag
+		for i := range flags {
+			if flags[i].name == flagNormalize {
+				got = &flags[i]
+			}
+		}
+		if got == nil {
+			t.Errorf("statusFlags(code %d) has no %s line", tt.status.Code(), flagNormalize)
+			continue
+		}
+		if got.value != tt.wantValue {
+			t.Errorf("code %d: %s = %q, want %q", tt.status.Code(), flagNormalize, got.value, tt.wantValue)
+		}
+		moved := got.note != "already a display status"
+		if moved != tt.wantMoved {
+			t.Errorf("code %d: %s note = %q (moved=%v), want moved=%v",
+				tt.status.Code(), flagNormalize, got.note, moved, tt.wantMoved)
+		}
+	}
+}
+
+// Every predicate the section prints must come from the SDK method of the same
+// name, and no name may be printed twice or invented. A typo would otherwise
+// only be caught by a test that happens to know the typo.
+func TestStatusFlags_PrintsEachPredicateOnceUnderItsOwnSDKName(t *testing.T) {
+	want := map[string]bool{
+		flagIsTrading: true, flagAllowTrading: true, flagIsUSMarket: true,
+		flagIsUSPrePost: true, flagIsUSPre: true, flagIsUSPost: true,
+		flagIsUSNight: true, flagIsClosing: true, flagIsUSClosing: true,
+		flagIsDark: true, flagIsSpecial: true, flagNormalize: true,
+		// Already in the table above the block: printing them here too would
+		// be duplication, not coverage. Name() is called by the block header
+		// rather than as a flag, and String() is never printed at all.
+		"Code": false, "Label": false, "Name": false, "String": false,
+	}
+	seen := map[string]int{}
+	for _, f := range statusFlags(market.TradeStatusUSTrading) {
+		if f.name == "" || f.value == "" || f.note == "" || f.group == "" {
+			t.Errorf("flag %+v has an empty field; an unlabelled row is unreadable", f)
+		}
+		if _, dup := seen[f.name]; dup {
+			t.Errorf("%s is printed %d times", f.name, seen[f.name]+1)
+		}
+		seen[f.name]++
+		if _, listed := want[f.name]; !listed {
+			t.Errorf("%s is not one of the section's flags", f.name)
+		}
+	}
+	for name, listed := range want {
+		if listed && seen[name] == 0 {
+			t.Errorf("%s is never printed", name)
+		}
+		if !listed && seen[name] != 0 {
+			t.Errorf("%s is printed here but already appears in the status table", name)
+		}
+	}
+}
+
+// The flags are the SDK's answer for the status it was given. A block whose
+// IsTrading disagrees with the SDK would make the whole section a liar, and
+// the table above would contradict the block directly beneath it.
+func TestStatusFlags_EachValueIsTheSDKMethodsAnswerForThatStatus(t *testing.T) {
+	for _, s := range []market.TradeStatus{
+		market.TradeStatusUSPrev, market.TradeStatusUSTrading,
+		market.TradeStatusUSAfter, market.TradeStatusUSNight,
+		market.TradeStatusUSClosing, market.TradeStatusHalfClosing,
+		market.TradeStatusTrading, market.TradeStatusOpenBid,
+		market.TradeStatusDarkTrading, market.TradeStatusUSStop,
+	} {
+		want := statusFlagSet(s)
+		for _, f := range statusFlags(s) {
+			expected, ok := want[f.name]
+			if !ok {
+				continue // Normalize, covered above.
+			}
+			if f.value != yn(expected) {
+				t.Errorf("code %d: %s printed as %q, want %q", s.Code(), f.name, f.value, yn(expected))
+			}
+		}
+	}
+}
+
+// ------------------------------------------------------------ status rendering
+
+// lineWithName returns the first line that carries name as a whole field, so a
+// name that is a substring of another (IsClosing of IsUSClosing) cannot match
+// the wrong row.
+func lineWithName(lines []string, name string) string {
+	for _, l := range lines {
+		for _, f := range strings.Fields(l) {
+			if f == name {
+				return l
+			}
+		}
+	}
+	return ""
+}
+
+// flagValue is the second field of a flag line: the predicate name, then the
+// SDK's answer, then the note.
+func flagValue(line, name string) string {
+	fields := strings.Fields(line)
+	if len(fields) < 2 {
+		return ""
+	}
+	return fields[1]
+}
+
+// The two "closed" rows are where the rendering could quietly collapse one
+// predicate into the other. IsClosing true with IsUSClosing false is the case
+// that proves they are two rows and not one row printed twice.
+func TestStatusStatusLines_ClosingRowsAreNotCollapsedIntoEachOther(t *testing.T) {
+	for _, tt := range []struct {
+		status          market.TradeStatus
+		wantIsClosing   string
+		wantIsUSClosing string
+	}{
+		{market.TradeStatusUSClosing, "true", "true"},
+		{market.TradeStatusUSPrevMarketClean, "true", "true"},
+		{market.TradeStatusClosing, "true", "false"},
+		{market.TradeStatusHalfClosing, "true", "false"},
+		{market.TradeStatusUSTrading, "false", "false"},
+	} {
+		lines := statusStatusLines("US", "status", tt.status)
+		for _, tc := range []struct{ name, want string }{
+			{flagIsClosing, tt.wantIsClosing},
+			{flagIsUSClosing, tt.wantIsUSClosing},
+		} {
+			got := flagValue(lineWithName(lines, tc.name), tc.name)
+			if got != tc.want {
+				t.Errorf("code %d: %s printed as %q, want %q\n%s",
+					tt.status.Code(), tc.name, got, tc.want, strings.Join(lines, "\n"))
+			}
+		}
+	}
+}
+
+// A status the API supplied gets a header with its code and its full name, and
+// one line per predicate. Name() is in the header rather than as a flag
+// because it is a name, not an answer, and because it fills the gap Label()
+// leaves for the codes it declines to label.
+func TestStatusStatusLines_PresentStatusPrintsHeaderAndEveryFlag(t *testing.T) {
+	lines := statusStatusLines("HK", "status", market.TradeStatusTrading)
+	joined := strings.Join(lines, "\n")
+
+	if len(lines) == 0 {
+		t.Fatal("a supplied status printed no lines")
+	}
+	if want := "code 105 (Trading)"; !strings.Contains(joined, want) {
+		t.Errorf("block does not name the status:\n%s\nwant a header containing %q", joined, want)
+	}
+	// Grouped, not alphabetical: the grouping carries the meaning.
+	wantOrder := []string{"session", "us hours", "closed", "other"}
+	at := -1
+	for _, g := range wantOrder {
+		i := strings.Index(joined, "\n    "+g+"\n")
+		if i < 0 {
+			t.Fatalf("no %q group header in:\n%s", g, joined)
+		}
+		if i <= at {
+			t.Errorf("group %q is out of order in:\n%s", g, joined)
+		}
+		at = i
+	}
+	for _, name := range []string{
+		flagIsTrading, flagAllowTrading, flagIsUSMarket, flagIsUSPrePost,
+		flagIsUSPre, flagIsUSPost, flagIsUSNight, flagIsClosing,
+		flagIsUSClosing, flagIsDark, flagIsSpecial, flagNormalize,
+	} {
+		if lineWithName(lines, name) == "" {
+			t.Errorf("no line for %s in:\n%s", name, joined)
+		}
+	}
+	// A note that states what the predicate tests, so the row cannot be read as
+	// more than it is.
+	if !strings.Contains(joined, "orders accepted") {
+		t.Errorf("no note for AllowTrading in:\n%s", joined)
+	}
+}
+
+// A status the API did not supply prints a dash and a sentence, and no
+// predicate at all. Printing a row of falses would claim the market is closed;
+// printing the flags would be worse still, because IsSpecial is true for every
+// code below 100 and would call a market we know nothing about "special".
+func TestStatusStatusLines_AbsentStatusRendersADashAndNoPredicates(t *testing.T) {
+	for _, s := range []market.TradeStatus{market.TradeStatusNoRegisterQuote, market.TradeStatusUnknown} {
+		lines := statusStatusLines("HK", "status", s)
+		joined := strings.Join(lines, "\n")
+
+		if len(lines) != 1 {
+			t.Errorf("code %d: printed %d lines, want exactly the absent note:\n%s", s.Code(), len(lines), joined)
+		}
+		if !strings.Contains(joined, "status: - (no status supplied") {
+			t.Errorf("code %d: absent status is not rendered as a dash:\n%s", s.Code(), joined)
+		}
+		if !strings.Contains(joined, "no status supplied") {
+			t.Errorf("code %d: absent status does not say why:\n%s", s.Code(), joined)
+		}
+		for _, name := range []string{
+			flagIsTrading, flagAllowTrading, flagIsUSMarket, flagIsUSPrePost,
+			flagIsUSPre, flagIsUSPost, flagIsUSNight, flagIsClosing,
+			flagIsUSClosing, flagIsDark, flagIsSpecial,
+		} {
+			if strings.Contains(joined, name) {
+				t.Errorf("code %d: an absent status printed the %s predicate", s.Code(), name)
+			}
+		}
+		if strings.Contains(joined, "false") || strings.Contains(joined, "true") {
+			t.Errorf("code %d: an absent status printed a boolean:\n%s", s.Code(), joined)
+		}
+	}
+}
+
+// Absent is exactly the two "no status" codes, and nothing else. A status that
+// merely declines to be labelled (dark, the auctions) is still a status, and
+// calling it absent would hide the very states the section exists to show.
+func TestStatusAbsent_OnlyTheTwoNoStatusCodesCountAsAbsent(t *testing.T) {
+	for _, s := range []market.TradeStatus{
+		market.TradeStatusNoRegisterQuote, market.TradeStatusUnknown,
+	} {
+		if !statusAbsent(s) {
+			t.Errorf("statusAbsent(code %d) = false, want true", s.Code())
+		}
+	}
+	for _, s := range []market.TradeStatus{
+		market.TradeStatusUSTrading, market.TradeStatusUSPrev, market.TradeStatusUSAfter,
+		market.TradeStatusUSNight, market.TradeStatusUSClosing, market.TradeStatusTrading,
+		market.TradeStatusDarkWait, market.TradeStatusDarkTrading, market.TradeStatusDarkClosing,
+		market.TradeStatusOpenBid, market.TradeStatusCloseBid, market.TradeStatusNoonClosing,
+		market.TradeStatusAfterFix, market.TradeStatusRealtimeQuote, market.TradeStatusNotOpened,
+		market.TradeStatusClean, market.TradeStatusClosing, market.TradeStatusHalfClosing,
+		market.TradeStatusUSStop, market.TradeStatusDelist, market.TradeStatusFuse,
+	} {
+		if statusAbsent(s) {
+			t.Errorf("statusAbsent(code %d) = true, want false", s.Code())
+		}
+	}
+}
+
+// The live and the delayed status are two different answers and must stay two
+// blocks. Rendering the delay status in the live block — the easy refactor,
+// since the template is shared — would be a completely wrong answer rather
+// than a slightly wrong one.
+func TestStatusDetailLines_LiveAndDelayStatusAreSeparateBlocks(t *testing.T) {
+	lines := statusDetailLines(market.MarketTimeItem{
+		Market:           "US",
+		TradeStatus:      market.TradeStatusUSPrev,
+		DelayTradeStatus: market.TradeStatusUSTrading,
+	})
+
+	live, delay := splitStatusBlocks(t, lines)
+
+	if !strings.Contains(live, "code 201 (Pre-Market)") {
+		t.Errorf("live block does not carry the live status:\n%s", live)
+	}
+	if !strings.Contains(delay, "code 202 (Trading)") {
+		t.Errorf("delay block does not carry the delay status:\n%s", delay)
+	}
+	if !strings.Contains(live, "status: code 201") {
+		t.Errorf("live block is not labelled as the status:\n%s", live)
+	}
+	if !strings.Contains(delay, "delay status: code 202") {
+		t.Errorf("delay block is not labelled as the delay status:\n%s", delay)
+	}
+	// The values have to belong to their own block, not merely be present
+	// somewhere in the output.
+	for _, tc := range []struct {
+		block, name, want string
+	}{
+		{live, flagIsTrading, "false"},
+		{live, flagIsUSPre, "true"},
+		{live, flagIsUSPrePost, "true"},
+		{delay, flagIsTrading, "true"},
+		{delay, flagIsUSPre, "false"},
+		{delay, flagIsUSPrePost, "false"},
+	} {
+		got := flagValue(lineWithName(strings.Split(tc.block, "\n"), tc.name), tc.name)
+		if got != tc.want {
+			t.Errorf("block containing %q: %s = %q, want %q\n%s",
+				strings.Fields(tc.block)[1], tc.name, got, tc.want, tc.block)
+		}
+	}
+}
+
+// Both statuses absent, one absent and one present, and the reverse: each case
+// must fall back independently, because the API does not supply them together.
+func TestStatusDetailLines_EachBlockFallsBackOnItsOwnStatus(t *testing.T) {
+	tests := []struct {
+		name             string
+		live             market.TradeStatus
+		delay            market.TradeStatus
+		wantLive         string
+		wantDelay        string
+		wantLiveHasFlags bool
+	}{
+		{
+			name: "neither supplied", live: market.TradeStatusNoRegisterQuote,
+			delay:     market.TradeStatusUnknown,
+			wantLive:  "status: - (no status supplied, code 0)",
+			wantDelay: "delay status: - (no status supplied, code -1)",
+		},
+		{
+			name: "only the live status", live: market.TradeStatusUSTrading,
+			delay:            market.TradeStatusNoRegisterQuote,
+			wantLive:         "status: code 202 (Trading)",
+			wantDelay:        "delay status: - (no status supplied, code 0)",
+			wantLiveHasFlags: true,
+		},
+		{
+			name: "only the delay status", live: market.TradeStatusNoRegisterQuote,
+			delay:     market.TradeStatusUSTrading,
+			wantLive:  "status: - (no status supplied, code 0)",
+			wantDelay: "delay status: code 202 (Trading)",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			lines := statusDetailLines(market.MarketTimeItem{
+				Market: "US", TradeStatus: tt.live, DelayTradeStatus: tt.delay,
+			})
+			live, delay := splitStatusBlocks(t, lines)
+			if !strings.Contains(live, tt.wantLive) {
+				t.Errorf("live block:\n%s\nwant it to contain %q", live, tt.wantLive)
+			}
+			if !strings.Contains(delay, tt.wantDelay) {
+				t.Errorf("delay block:\n%s\nwant it to contain %q", delay, tt.wantDelay)
+			}
+			// A present block carries its predicates; an absent one carries no
+			// boolean at all.
+			for _, tc := range []struct {
+				block    string
+				wantFlag bool
+			}{
+				{live, tt.wantLiveHasFlags},
+				{delay, !tt.wantLiveHasFlags && strings.Contains(tt.wantDelay, "status: code ")},
+			} {
+				hasFlag := lineWithName(strings.Split(tc.block, "\n"), flagIsTrading) != ""
+				if hasFlag != tc.wantFlag {
+					t.Errorf("block %q printed the %s line: %v, want %v\n%s",
+						strings.Fields(tc.block)[0], flagIsTrading, hasFlag, tc.wantFlag, tc.block)
+				}
+			}
+		})
+	}
+}
+
+// splitStatusBlocks returns the live block and the delay block of a rendered
+// detail, failing the test if either is missing or if a line names both. A
+// block runs from its "status:"/"delay status:" header to the next header, so
+// the predicate lines below a header are attributed to it.
+func splitStatusBlocks(t *testing.T, lines []string) (live, delay string) {
+	t.Helper()
+	var liveLines, delayLines []string
+	var cur *[]string
+	for _, l := range lines {
+		switch {
+		case strings.Contains(l, "delay status:"):
+			if strings.Count(l, "status:") != 1 {
+				t.Errorf("line %q names more than one status", l)
+			}
+			delayLines = append(delayLines, l)
+			cur = &delayLines
+		case strings.Contains(l, "status:"):
+			liveLines = append(liveLines, l)
+			cur = &liveLines
+		default:
+			if cur == nil {
+				t.Fatalf("line %q belongs to no block:\n%s", l, strings.Join(lines, "\n"))
+			}
+			*cur = append(*cur, l)
+		}
+	}
+	if len(liveLines) == 0 || len(delayLines) == 0 {
+		t.Fatalf("want a live block and a delay block, got:\n%s", strings.Join(lines, "\n"))
+	}
+	return strings.Join(liveLines, "\n"), strings.Join(delayLines, "\n")
+}
