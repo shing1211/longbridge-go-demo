@@ -354,20 +354,30 @@ type attempt struct {
 
 func (a attempt) reached() bool { return a.calls > 0 }
 
-// try runs w with both streams captured. stderr is captured inside stdout
-// because describe() prints the request preview to stdout and the gate prints
-// its refusal to stderr; one call has to produce both.
-func try(t *testing.T, w gatedWrite, cfg *appcfg.Config) attempt {
+// capture runs fn with both streams captured and a fresh failConnect behind it.
+// stderr is captured inside stdout because describe() prints the request
+// preview to stdout and the gate prints its refusal to stderr; one call has to
+// produce both. fn is handed the fake connect so it can be passed on by value,
+// which is what lets try and tryRoute share this.
+func capture(t *testing.T, fn func(connect func() (*quote.QuoteContext, error)) error) attempt {
 	t.Helper()
 	c := &failConnect{}
 	var a attempt
 	a.preview = captureStdout(t, func() {
 		a.stderr = captureStderr(t, func() {
-			a.err = w.run(context.Background(), cfg, c.connect)
+			a.err = fn(c.connect)
 		})
 	})
 	a.calls = c.calls
 	return a
+}
+
+// try runs w with both streams captured.
+func try(t *testing.T, w gatedWrite, cfg *appcfg.Config) attempt {
+	t.Helper()
+	return capture(t, func(connect func() (*quote.QuoteContext, error)) error {
+		return w.run(context.Background(), cfg, connect)
+	})
 }
 
 // mustBeRefused is the load-bearing assertion, shared so all four mutations are
@@ -712,4 +722,260 @@ func TestGate_AnEmptyActionDescriptionIsNotASafetyRefusal(t *testing.T) {
 	if !strings.Contains(err.Error(), "action description is required") {
 		t.Errorf("gate() reworded the guard's own error as %q", err)
 	}
+}
+
+// ----------------------------------------------------------------- dispatch
+//
+// route is the switch that maps -action onto one of the five handlers, and it
+// is the only place in the binary that decides whether an action is gated at
+// all. The gate tests above drive doCreate/doDelete/doUpdate/doPin directly,
+// one function at a time, so they cannot see the sentence above them: a list
+// case that acquired a gate() call, a create case wired to doDelete, a dropped
+// default, a dropped strings.ToLower. Each of those is a one-line edit that
+// leaves every per-function test green, so each has a test below that fails on
+// it. The read case is the one worth the most here: nothing else in the suite
+// would notice a dry run that had started refusing reads.
+
+// tryRoute runs the dispatcher with both streams captured, so a run that went
+// through route offers the same three observations as one that called a write
+// function directly: what it printed, what the gate said, how many times it
+// tried to build a client.
+func tryRoute(t *testing.T, cfg *appcfg.Config) attempt {
+	t.Helper()
+	return capture(t, func(connect func() (*quote.QuoteContext, error)) error {
+		return route(context.Background(), cfg, connect)
+	})
+}
+
+// actions is the vocabulary route has to accept, in the order the
+// unknown-action error lists it. The binary states this set in exactly two
+// places — the -action flag help and that error text — and this list is checked
+// against the second of them below, so a sixth action cannot be added to one and
+// forgotten in the other.
+func actions() []string { return []string{"list", "create", "delete", "update", "pin"} }
+
+// flagsFor installs the valid flag set with -action set and --confirm set to
+// the given value, which is the state a user gets from naming an action with or
+// without the acknowledgement flag. Pass confirm=true when the test needs the
+// gate's SECOND branch to be the one that refuses: that branch quotes the
+// mutation, and it is the only evidence of which handler the dispatcher chose.
+func flagsFor(t *testing.T, action string, confirm bool) {
+	t.Helper()
+	s := validWatchlistState()
+	s.action, s.confirm = action, confirm
+	setWatchlistFlags(t, s)
+}
+
+// TestRoute_ListIsNotGatedEvenWithTheGateFullyShut is the load-bearing test in
+// this file. The list case consults no guard, by design, so with the gate shut —
+// the same blockedCfg and the same LONGPORT_WATCHLIST_DRY_RUN=1 that refuse
+// every one of the four writes — a read must still build its client. A read that
+// stopped working in dry run would be a user-visible outage in the one mode
+// every user runs in, and until route existed nothing in the suite could see it.
+func TestRoute_ListIsNotGatedEvenWithTheGateFullyShut(t *testing.T) {
+	setWatchlistFlags(t, watchlistState{action: "list"})
+	t.Setenv("LONGPORT_WATCHLIST_DRY_RUN", "1")
+
+	// Non-vacuity: the gate really is shut in this configuration, and the
+	// refusal it would give a write is the one the four writes above depend on.
+	// "list" is passed only as an action description to prove the gate would
+	// refuse; route is not supposed to consult it.
+	if !appcfg.WatchlistDryRun() {
+		t.Fatal("LONGPORT_WATCHLIST_DRY_RUN=1 but WatchlistDryRun() = false; " +
+			"this test would be measuring an open gate")
+	}
+	var refused error
+	_ = captureStderr(t, func() { refused = gate(blockedCfg(), "list") })
+	if !isBlocked(refused) {
+		t.Fatalf("gate(cfg, %q) = %v with the gate shut, so this test can no longer "+
+			"tell a gated read from an ungated one", "list", refused)
+	}
+
+	a := tryRoute(t, blockedCfg())
+	if !a.reached() {
+		t.Fatalf("route(list) never called connect() with the gate shut; the read was " +
+			"refused by a guard, and reads are not gated")
+	}
+	if a.calls != 1 {
+		t.Errorf("route(list) called connect() %d times, want exactly 1", a.calls)
+	}
+	if a.err == nil {
+		t.Fatal("route(list) = nil although the fake connect failed")
+	}
+	if isBlocked(a.err) {
+		t.Errorf("route(list) = %v, a *config.BlockedError; the read reached the gate", a.err)
+	}
+	if !errors.Is(a.err, context.Canceled) {
+		t.Errorf("route(list) = %v, want the fake connect's context.Canceled, which is the "+
+			"error the real quote context would have produced", a.err)
+	}
+	if strings.Contains(a.stderr, "BLOCKED") {
+		t.Errorf("route(list) printed a refusal while reading.\nstderr was:\n%s", a.stderr)
+	}
+	if a.preview != "" {
+		t.Errorf("route(list) printed a request preview; only writes describe a request.\npreview was:\n%s", a.preview)
+	}
+}
+
+// The refusal, reached through the dispatcher instead of the handler. A case
+// that skipped its handler, or a dispatcher that handed a write a gate that had
+// already been passed, would let a mutation through with the switch shut.
+func TestRoute_AllFourWritesAreRefusedByTheGateWithNoConnectCall(t *testing.T) {
+	for _, w := range gatedWrites() {
+		t.Run(w.name, func(t *testing.T) {
+			flagsFor(t, w.name, false)
+			t.Setenv("LONGPORT_WATCHLIST_DRY_RUN", "1")
+			tryRoute(t, blockedCfg()).mustBeRefused(t, w)
+		})
+	}
+}
+
+// Routing rather than safety. A misrouted write is refused exactly as
+// thoroughly as the right one, so every assertion above it passes if create is
+// wired to doDelete; the two things that name the handler are the request
+// preview and the action description in the refusal, and both are checked here.
+func TestRoute_EachActionReachesTheHandlerItNames(t *testing.T) {
+	for _, w := range gatedWrites() {
+		t.Run(w.name, func(t *testing.T) {
+			flagsFor(t, w.name, true)
+			t.Setenv("LONGPORT_WATCHLIST_DRY_RUN", "1")
+			a := tryRoute(t, blockedCfg())
+			a.mustBeRefused(t, w)
+			if !strings.Contains(a.preview, w.wantSDK) {
+				t.Errorf("route(%q) preview does not name %q, so -action %q is wired to a "+
+					"different handler.\npreview was:\n%s", w.name, w.wantSDK, w.name, a.preview)
+			}
+			if !strings.Contains(a.stderr, w.wantAction) {
+				t.Errorf("route(%q) refusal does not name %q, so the user cannot tell which "+
+					"mutation was stopped.\nrefusal was:\n%s", w.name, w.wantAction, a.stderr)
+			}
+		})
+	}
+}
+
+// An unknown action is a usage error and has to be reported as one: a plain
+// error naming what was typed, listing what is accepted, building no client and
+// printing no request preview. In particular it must not wrap ErrBlocked, which
+// would exit 3 and send an operator to edit a switch that was already correct.
+func TestRoute_AnUnknownActionIsRejectedLocallyWithoutAClient(t *testing.T) {
+	t.Setenv("LONGPORT_WATCHLIST_DRY_RUN", "1")
+	tests := []struct {
+		name string
+		bad  string
+	}{
+		{"a typo", "nope"},
+		{"the empty string", ""},
+		{"a valid action for another command", "buy"},
+		{"a valid update mode", "replace"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			flagsFor(t, tt.bad, false)
+			a := tryRoute(t, blockedCfg())
+			if a.err == nil {
+				t.Fatalf("route(%q) = nil; a mistyped action would silently do nothing and exit 0", tt.bad)
+			}
+			if isBlocked(a.err) {
+				t.Errorf("route(%q) = %v, a *config.BlockedError; a usage error must not exit %d "+
+					"and blame a safety switch", tt.bad, a.err, appcfg.ExitBlocked)
+			}
+			if want := fmt.Sprintf("unknown -action %q", tt.bad); !strings.Contains(a.err.Error(), want) {
+				t.Errorf("route(%q) = %q, want it to contain %q", tt.bad, a.err, want)
+			}
+			// The valid set is stated by the flag help and by this message, and
+			// actions() is the third copy; checking one against the other is what
+			// keeps a renamed or new action from being documented in one place
+			// only.
+			for _, want := range actions() {
+				if !strings.Contains(a.err.Error(), want) {
+					t.Errorf("route(%q) = %q, which does not list %q among the valid actions",
+						tt.bad, a.err, want)
+				}
+			}
+			if a.reached() {
+				t.Errorf("route(%q) called connect() %d time(s); the action matched no case, "+
+					"so nothing should have been built", tt.bad, a.calls)
+			}
+			if a.preview != "" {
+				t.Errorf("route(%q) printed a request preview for an action it did not "+
+					"recognise.\npreview was:\n%s", tt.bad, a.preview)
+			}
+			if strings.Contains(a.stderr, "BLOCKED") {
+				t.Errorf("route(%q) printed a refusal for a usage error.\nstderr was:\n%s", tt.bad, a.stderr)
+			}
+		})
+	}
+}
+
+// The switch folds case with strings.ToLower, so -action LIST is the read and
+// -action Create is the create, on shells and scripts that shout. Asserted as
+// equivalence rather than by restating each action's behaviour: a differently
+// cased spelling must produce byte-identical output and identical gate
+// behaviour, which also catches a ToLower dropped for one case only.
+func TestRoute_ActionNamesAreCaseInsensitive(t *testing.T) {
+	t.Setenv("LONGPORT_WATCHLIST_DRY_RUN", "1")
+	for _, name := range actions() {
+		t.Run(name, func(t *testing.T) {
+			want := routed(t, name)
+			spellings := []string{
+				strings.ToUpper(name),
+				strings.ToUpper(name[:1]) + name[1:],
+			}
+			for _, spelling := range spellings {
+				t.Run(spelling, func(t *testing.T) {
+					got := routed(t, spelling)
+					if got.blocked != want.blocked {
+						t.Errorf("route(%q) %s where route(%q) %s: the case fold changed "+
+							"whether the gate refused", spelling, describeOutcome(got), name, describeOutcome(want))
+					}
+					if got.calls != want.calls {
+						t.Errorf("route(%q) called connect() %d time(s), route(%q) called it %d; "+
+							"the case fold changed whether the SDK was reached",
+							spelling, got.calls, name, want.calls)
+					}
+					if got.preview != want.preview {
+						t.Errorf("route(%q) printed a different request than route(%q):\n%s\nwant:\n%s",
+							spelling, got.preview, name, want.preview)
+					}
+					if got.err != want.err {
+						t.Errorf("route(%q) = %q, route(%q) = %q", spelling, got.err, name, want.err)
+					}
+				})
+			}
+		})
+	}
+}
+
+// outcome is everything a test can see about one dispatched run: whether the
+// gate refused, how many clients were attempted, the request preview, and the
+// error as text. The error is a string because the case-insensitivity test
+// compares two runs for sameness rather than against any particular value.
+type outcome struct {
+	err     string
+	blocked bool
+	calls   int
+	preview string
+}
+
+// describeOutcome is only ever used in a failure message, so it says which of
+// the two verdicts a run got rather than repeating the raw flag.
+func describeOutcome(o outcome) string {
+	if o.blocked {
+		return "was refused by the gate"
+	}
+	return "was not refused by the gate"
+}
+
+// routed runs one action through route with the gate shut and --confirm passed,
+// so a write is refused by GuardWatchlist with the mutation named, and reports
+// what happened. Every spelling of an action must produce the same outcome as
+// the lowercase one.
+func routed(t *testing.T, action string) outcome {
+	t.Helper()
+	flagsFor(t, action, true)
+	a := tryRoute(t, blockedCfg())
+	if a.err == nil {
+		t.Fatalf("route(%q) = nil although the fake connect refused to build a client", action)
+	}
+	return outcome{err: a.err.Error(), blocked: isBlocked(a.err), calls: a.calls, preview: a.preview}
 }

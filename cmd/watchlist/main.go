@@ -72,48 +72,70 @@ func main() {
 		appcfg.WatchlistDryRun())
 
 	cli.Run(func(ctx context.Context) error {
-		// Lazily created, for the same reason the trade binary does it: a
-		// blocked write must not authenticate or open a connection.
-		var qc *quote.QuoteContext
-		defer func() {
-			if qc != nil {
-				if err := qc.Close(); err != nil {
-					fmt.Fprintf(os.Stderr, "warning: closing quote context: %v\n", err)
-				}
+		return dispatch(ctx, cfg)
+	})
+}
+
+// dispatch owns the lazy quote context and hands the client constructor to
+// route.
+//
+// It is a separate function because main() is invisible to the suite: main
+// parses os.Args and ends in os.Exit, so the switch that chose between the five
+// actions — the one place that decides a read stays ungated and a write goes
+// through the gate — had no test reaching it at all. Moving the switch out of
+// that closure is what lets a test pass failConnect in place of connect and
+// watch which actions dial the API.
+func dispatch(ctx context.Context, cfg *appcfg.Config) error {
+	// Lazily created, for the same reason the trade binary does it: a
+	// blocked write must not authenticate or open a connection.
+	var qc *quote.QuoteContext
+	defer func() {
+		if qc != nil {
+			if err := qc.Close(); err != nil {
+				fmt.Fprintf(os.Stderr, "warning: closing quote context: %v\n", err)
 			}
-		}()
-		connect := func() (*quote.QuoteContext, error) {
-			if qc != nil {
-				return qc, nil
-			}
-			c, err := quote.NewFromCfg(cfg.SDK)
-			if err != nil {
-				return nil, fmt.Errorf("creating quote context: %w", err)
-			}
-			qc = c
+		}
+	}()
+	connect := func() (*quote.QuoteContext, error) {
+		if qc != nil {
 			return qc, nil
 		}
-
-		switch strings.ToLower(action) {
-		case "list":
-			// Read-only: no guard is consulted, by design.
-			c, err := connect()
-			if err != nil {
-				return err
-			}
-			return printGroups(ctx, c)
-		case "create":
-			return doCreate(ctx, cfg, connect)
-		case "delete":
-			return doDelete(ctx, cfg, connect)
-		case "update":
-			return doUpdate(ctx, cfg, connect)
-		case "pin":
-			return doPin(ctx, cfg, connect)
-		default:
-			return fmt.Errorf("unknown -action %q: want list, create, delete, update or pin", action)
+		c, err := quote.NewFromCfg(cfg.SDK)
+		if err != nil {
+			return nil, fmt.Errorf("creating quote context: %w", err)
 		}
-	})
+		qc = c
+		return qc, nil
+	}
+	return route(ctx, cfg, connect)
+}
+
+// route maps -action onto the function that serves it. connect is a parameter
+// rather than dispatch's closure so a test can supply a fake.
+//
+// The read case is deliberately first and is the only one that calls connect()
+// itself; it consults neither cfg nor the gate, so "a read is not gated" holds
+// by the shape of this function and not only by the comment above the case.
+func route(ctx context.Context, cfg *appcfg.Config, connect func() (*quote.QuoteContext, error)) error {
+	switch strings.ToLower(action) {
+	case "list":
+		// Read-only: no guard is consulted, by design.
+		c, err := connect()
+		if err != nil {
+			return err
+		}
+		return printGroups(ctx, c)
+	case "create":
+		return doCreate(ctx, cfg, connect)
+	case "delete":
+		return doDelete(ctx, cfg, connect)
+	case "update":
+		return doUpdate(ctx, cfg, connect)
+	case "pin":
+		return doPin(ctx, cfg, connect)
+	default:
+		return fmt.Errorf("unknown -action %q: want list, create, delete, update or pin", action)
+	}
 }
 
 // ----------------------------------------------------------------- read path
