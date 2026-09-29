@@ -1,6 +1,6 @@
 BIN        := bin
 GO         ?= go
-BINARIES   := quote trade watch market warrant watchlist executions reference fundamentals sharelist content portfolio dca alert
+BINARIES   := quote trade watch market warrant watchlist executions reference fundamentals sharelist content portfolio dca alert screener
 CMDS       := $(addprefix ./cmd/,$(BINARIES))
 
 .PHONY: all
@@ -84,6 +84,10 @@ run-dca: ## go run ./cmd/dca
 .PHONY: run-alert
 run-alert: ## go run ./cmd/alert
 	$(GO) run ./cmd/alert
+
+.PHONY: run-screener
+run-screener: ## go run ./cmd/screener
+	$(GO) run ./cmd/screener
 
 .PHONY: clean
 clean: ## Remove build output
