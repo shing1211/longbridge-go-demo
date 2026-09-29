@@ -496,6 +496,46 @@ Note that `executions -action withdraw` is an **order** write (`WithdrawOrder`
 is an alias of `CancelOrder` in the SDK), so it uses the order gate and
 `--confirm-live` — not the watchlist gate.
 
+### The read-only invariant: eight binaries assert it
+
+Separately from the six write gates, **eight** of the fifteen binaries assert
+the **order** gate is still closed at startup. If the order gate is open they
+refuse to run at all, rather than proceeding in a misconfigured environment:
+
+| | |
+| --- | --- |
+| Binaries | `quote`, `watch`, `warrant`, `reference`, `portfolio`, `fundamentals`, `market`, `screener` |
+| Check | `if cfg.GuardWrite("run the …") == nil { cli.Fail(…) }` |
+| Exit | **1**, `internal invariant violated: <name> is read-only but the order gate is open` |
+
+```console
+$ LONGPORT_DRY_RUN=0 LONGPORT_MODE=live ./bin/market
+[config] mode=live dry_run=false app_key=abcd******gh http=https://openapi.longbridge.com (SDK default) …
+error: internal invariant violated: market is read-only but the order gate is open
+```
+
+`cmd/market` and `cmd/watch` joined the set in this pass. Both were verified
+before being added rather than assumed:
+
+- **`cmd/market` is read-only.** All eleven `MarketContext` methods are `GET`;
+  the twelfth, `TopMovers`, is a `POST` that computes and mutates nothing
+  (it is the same shape as `ScreenerContext.Search`, and the same argument
+  applies). The two websocket-backed sections, `calendar` and `timeline`, are
+  query commands on the quote context. There is no write method in the file.
+- **`cmd/watch` has no write path at all.** Its complete SDK surface is
+  `Subscribe`, `Unsubscribe`, `Subscriptions` and the `On*` push callbacks; it
+  never touches the HTTP client. Its `-orders` mode holds a `TradeContext` for
+  the push subscription only, and a subscription changes nothing server-side.
+
+The other seven binaries that gate writes but do **not** carry the assertion are
+`trade`, `executions`, `watchlist`, `sharelist`, `content`, `dca` and `alert` —
+correctly, because for them an open order gate is a legitimate state.
+
+**This assertion is not test-covered, in any of the eight.** It lives in
+`main()`, and `main()` is not reachable from a test. Deleting any one of the
+eight checks leaves the suite green; that was checked by mutation. Do not read
+the test suite as evidence that this holds.
+
 ---
 
 ## Commands
@@ -546,16 +586,35 @@ LONGPORT_DRY_RUN=0 LONGPORT_MODE=live \
 | Flag | Default | Notes |
 | --- | --- | --- |
 | `-action` | `balance` | `balance positions today-orders history-orders submit replace cancel`. |
-| `-symbol` | — | Required for `submit`; optional filter elsewhere. |
-| `-order-id` | — | Required for `replace` and `cancel`. |
+| `-symbol` | `""` | Required for `submit`; optional filter elsewhere. Padded values are trimmed; a whitespace-only one is an error, not an omission. |
+| `-order-id` | `""` | Required for `replace` and `cancel`. Same trimming rule. |
 | `-qty` | `0` | Required for `submit` and `replace`. |
-| `-price` | — | Decimal string. |
+| `-price` | `""` | Decimal string. Same trimming rule — and a blank one is refused rather than read as **zero**. |
 | `-side` | `Buy` | `Buy` or `Sell`. |
 | `-type` | `LO` | `LO ELO MO AO ALO ODD LIT MIT TSLPAMT TSLPPCT TSMAMT TSMPCT SLO`. |
 | `-tif` | `Day` | `Day`, `GTC`, `GTD`. |
 | `-remark` | — | Free text. |
 | `-days` | `7` | Lookback for `history-orders`. |
 | `-confirm-live` | `false` | Required acknowledgement for writes. |
+
+**A blank flag is a flag error, not a gate refusal.** `-symbol "   "`,
+`-order-id "   "` and `-price "   "` used to be trimmed to `""` and read as
+"not supplied". For `-symbol` and `-order-id` that sent a blank value to the
+gate, which refused it with a message about the three switches and named none of
+the flags the user actually got wrong — so a `-symbol "   "` **exited 3**, the
+one code in this repo that means "a gate protected you". For `-price` it was
+worse: the blank became `decimal.Zero`, a **zero limit price**. All three are now
+exit **1** and name the flag. Padded values (`-symbol " 700.HK "`) are still
+trimmed and accepted, because a stray space is a typo, not a value. The six
+enum parsers in this file (`-side`, `-type`, `-tif`, and the rest) have always
+folded case and trimmed; this makes the string flags agree with them.
+
+The `truncate` helper that clips a position's security name to 24 bytes is also
+safe at the boundary: a width of 0 or less returns an ellipsis rather than
+slicing at `-1`. The input was unreachable from the CLI, and the test that used
+to document the panic has been inverted to assert the new behaviour. This
+mirrors `cli.Truncate` in `internal/cli`, which guards the same boundary for the
+other fourteen binaries.
 
 ### `watch` — realtime stream (read-only)
 
@@ -591,6 +650,16 @@ pushes arrive on a different websocket (`wss://openapi-trade...`). It is still
 read-only: subscribing to a push feed changes nothing server-side. It reports
 per-topic subscribe failures explicitly, because a partial subscribe still
 "successfully" returns and silently streaming nothing is the confusing outcome.
+
+**It also carries the read-only invariant assertion** described under
+[the read-only invariant](#the-read-only-invariant-eight-binaries-assert-it):
+if the order gate is open, the binary refuses to start. That claim was verified
+rather than assumed. The complete SDK surface this file touches is `Subscribe`,
+`Unsubscribe`, `Subscriptions` and the `On*` push callbacks — it never touches
+the HTTP client at all, so there is no request it could make that would mutate
+anything. The `-orders` path holds a `TradeContext` for exactly one reason, the
+push subscription, and never calls `SubmitOrder`, `ReplaceOrder` or
+`CancelOrder`.
 
 ### `market` — market-wide data (read-only)
 
@@ -673,6 +742,24 @@ The broker periods and the A/H periods are bare `int` enums in the SDK, so they
 are parsed by explicit switch: an unrecognised value is an error rather than a
 silent zero. `TopMovers`' sort is a raw `uint32` for the same reason.
 
+**The `-broker-period` heading is mapped, not formatted.** `BrokerHoldingPeriod`
+is a 0-based `iota` while the API parameter is `rct_1` / `rct_5` / `rct_20` /
+`rct_60`, so the old heading — `fmt.Sprintf("rct_%d", int(period))` — printed
+the **enum index**, not the window: `rct_0` for a one-day window, `rct_1` for
+five-day, `rct_5` for twenty-day, and so on. It was wrong for every value. The
+*request* was always correct throughout, because the SDK does its own
+`BrokerHoldingPeriod.toAPIString` for the query parameter; only the label lied.
+It is now a `switch` over the four constants with an `unknown(n)` default,
+never a formula, and a test asserts all four:
+
+```console
+$ go run ./cmd/market -sections broker-holding -broker-period 5
+=== Broker holding 700.HK (rct_5) ===
+```
+
+`broker-holding-detail` and `broker-holding-daily` take no period at all and
+were never affected.
+
 `rank-categories` returns an opaque `json.RawMessage` in the SDK, not a typed
 struct, so the command pretty-prints the JSON instead of mapping fields it does
 not have. `rank-list` re-adds the SDK's internal `ib_` key prefix for you if
@@ -698,7 +785,7 @@ go run ./cmd/warrant -action issuers
 | `-underlying` | `700.HK` | Underlying stock for `list`. |
 | `-warrant-symbols` | `12181.HK,67408.HK` | Contracts for `quote`. |
 | `-sort-by` | `last_done` | `last_done change_rate change_val volume turnover expiry_date strike_price outstanding_qty implied_volatility delta status`. |
-| `-sort-order` | `desc` | `asc` or `desc`. |
+| `-sort-order` | `desc` | `asc` or `desc`. Surrounding whitespace is ignored, like the other five filter parsers in this file. |
 | `-count` | `10` | `sort_count`. |
 | `-offset` | `0` | `sort_offset`, for paging. |
 | `-type` | — | `call put bull bear inline`, comma-separated. |
@@ -711,6 +798,14 @@ Warrants are a HK-only product, so `-underlying` must be a `.HK` symbol. All
 the filter enums are bare `int32` in the SDK, so they are parsed by explicit
 switch: an unrecognised value is an error rather than a silent zero, because a
 wrong cast would quietly return the wrong warrants.
+
+All six parsers — `-type`, `-expiry`, `-moneyness`, `-status`, `-sort-by` and
+`-sort-order` — now fold case **and** trim, so `-sort-order "  asc  "` is
+accepted exactly as `-sort-order asc` is. `-sort-order` was the one that did
+not, which meant the same value was valid or invalid depending on which parser
+saw it. A test asserts each accepted value maps to the specific SDK constant,
+and that a value belonging to a *different* parser in the same file is refused
+rather than cast.
 
 ### `watchlist` — saved groups, with a gated editor
 
@@ -867,7 +962,7 @@ LONGPORT_SHARELIST_DRY_RUN=0 LONGPORT_MODE=live \
 | `-stock-limit` | `20` | Constituent rows printed per list. |
 | `-name` | — | **Required** for `create`. |
 | `-description` | — | Optional for `create`; the SDK defaults it to the name. |
-| `-symbols` | — | **Required** for `add`, `remove`, `sort`. `CODE.MARKET` form, checked locally. |
+| `-symbols` | — | **Required** for `add`, `remove`, `sort`. Each entry must be exactly `CODE.MARKET`; see below. |
 | `-confirm-live-sharelist` | `false` | **Required** for any write. |
 | `-show-state` | `false` | On a blocked `add`/`remove`/`sort`, also print the list's current contents (this makes a read-only request). |
 
@@ -893,9 +988,49 @@ ID nor its constituents, so the dry-run output says so explicitly. And
 order rather than the rows you want to move. Both the add/remove/sort and
 delete paths warn about this in their dry-run block.
 
-Note that `-symbols` is validated locally for the `CODE.MARKET` shape, because
-the SDK silently converts `700.HK` to a `counter_id` of `ST/HK/700` and a bare
-`700` would be sent as-is and rejected by the API.
+`-symbols` is validated locally, strictly, before any request. The SDK does no
+validation of its own: `symbolToCounterID` splits the entry on the **last** dot
+and builds `ST/<MARKET>/<CODE>` from whatever is left, so a malformed entry is
+not caught here — it is sent, and the API then rejects the whole request with a
+message naming neither the flag nor the entry. The check requires a non-empty
+code, **exactly one** dot, a non-empty market, and no whitespace inside the
+entry, and each error names the specific defect:
+
+```console
+$ go run ./cmd/sharelist -action add -id 12345 -symbols .HK --confirm-live-sharelist
+error: symbol ".HK" has an empty code before the dot: the SDK would build a counter_id with no instrument code, which nothing can match; want CODE.MARKET, e.g. 700.HK or TSLA.US
+
+$ go run ./cmd/sharelist -action add -id 12345 -symbols 700. --confirm-live-sharelist
+error: symbol "700." has an empty market after the dot: the SDK would build a counter_id with no market, which the API cannot resolve; want CODE.MARKET, e.g. 700.HK or TSLA.US
+
+$ go run ./cmd/sharelist -action add -id 12345 -symbols 700.HK.US --confirm-live-sharelist
+error: symbol "700.HK.US" has 2 dots: the SDK splits on the last one to build the counter_id, so the market and the code are not the two halves you typed; want CODE.MARKET, e.g. 700.HK or TSLA.US
+
+$ go run ./cmd/sharelist -action add -id 12345 -symbols "700 .HK" --confirm-live-sharelist
+error: symbol "700 .HK" contains whitespace: the SDK keeps it inside the counter_id it builds, so the request can never match an instrument; want CODE.MARKET, e.g. 700.HK or TSLA.US with no spaces
+```
+
+**This check was `strings.Contains(s, ".")` until this pass, and that was
+materially worse than it looks.** All four of the entries above passed it. The
+brief summary of the trade-off, because the stricter rule is a real narrowing
+and not a free improvement:
+
+- **What is lost.** The SDK splits on the *last* dot, so a class share such as
+  `BRK.B.US` — which becomes `ST/US/BRK.B` — and a bare index like `.DJI.US` —
+  which becomes `ST/US/.DJI` — were converted **correctly** before and are now
+  **refused**. Neither is reachable from the shapes this command is used for,
+  and a symbol the SDK can convert but this command cannot is a worse
+  experience than a clear refusal, so the refusal is the right call — but it is
+  a narrowing, and it is pinned by a test so it stays a recorded decision rather
+  than an accident.
+- **What is gained.** `.HK`, `700.`, `700.HK.US` and `700 .HK` no longer
+  produce a malformed `counter_id` and an opaque server error. Each one is now
+  named locally, before the gate, before the request.
+- **A correction to an earlier claim here.** `700.HK.US` does **not** become
+  `ST/US/HK` — the SDK's `symbolToCounterID` splits on the last dot, so it
+  becomes `ST/US/700.HK`, with the *first* half left intact inside the code.
+  That is exactly why the entry is wrong rather than merely unusual, and why
+  the local check has to reject it rather than pass it through.
 
 ### `content` — research and community content, with gated publishing
 
@@ -1071,7 +1206,7 @@ go run ./cmd/fundamentals -action calendar -calendar-category dividend
 | `-currency` | `USD` | For `valuation-compare`. |
 | `-report` / `-fiscal-year` / `-fiscal-period` | — / `0` / — | Passed through to `segments-history` and `snapshot`. |
 | `-cate` | — | Category filter for `segments-history`. |
-| `-indicator` | `0` | `industry-rank`: `0`–`7`. Numeric on purpose — the SDK defines no names for these codes. |
+| `-indicator` | `0` | `industry-rank`: `0`–`7`, one digit. Numeric on purpose — the SDK defines no names for these codes. Whitespace around it is ignored; `00`, `1.0` and `1e0` are refused. Checked at startup, not at the end of the run. |
 | `-sort-type` | `1` | `industry-rank`: `0` ascending, `1` descending. |
 | `-limit` | `20` | Row cap for `industry-rank`, `macro-indicators`, `macro`. |
 | `-object-id` | `0` | **Required** for `shareholder-detail`. |
@@ -1101,7 +1236,69 @@ total)` marker, so a cut-off block is never mistaken for a complete one.
 This binary additionally asserts the order gate is still **closed** at startup,
 exactly like the other readers: if you somehow run it with `LONGPORT_DRY_RUN=0`
 and `LONGPORT_MODE=live`, it refuses to run at all rather than proceeding in a
-misconfigured environment.
+misconfigured environment. See
+[the read-only invariant](#the-read-only-invariant-eight-binaries-assert-it).
+
+### Five validation fixes in this command
+
+This is the largest `cmd/*` package, and it is also where the flag validation and
+the request construction had drifted apart. All five of the following are now
+fixed, and each is worth stating because two of them were silent-wrong rather
+than loud-wrong.
+
+**1. `-indicator` is range-checked at startup.** It used to be parsed inside
+`printIndustryRank`, so a bad value was discovered at the *end* of a long
+industry-rank run — after the contexts were built and the requests were made.
+`validateFlags` now runs the same parser, so `-indicator 9` costs nothing:
+
+```console
+$ go run ./cmd/fundamentals -action industry-rank -indicator 9
+error: unknown -indicator "9": want 0 through 7 (the SDK defines no names for these codes)
+```
+
+**2. `validateFlags` delegates to the command's own parsers.** It used to keep a
+second, hand-written copy of each word list — and that copy lower-cased *without
+trimming* while every parser trimmed. So `-sort-type " 1 "` was reported as
+**unknown** at startup and would have been **valid** one layer down. The two
+layers can no longer disagree, because there is only one. This is what a startup
+error being *trustworthy* requires, and it is worth being explicit that the
+divergence was a correctness bug, not just a tidiness one: `printStatements`
+compared the **raw string** to `"monthly"`, so a padded
+`-statement-type "  monthly  "` accepted at startup would have requested
+**daily**. It now calls the same `parseStatementType`, so that is no longer
+reachable.
+
+**3. `marketFromSymbol` validates the market suffix.** `industry-rank` and
+`industry-peers` take a *market*, not a security, and the suffix was taken as
+given. The no-suffix fallback to HK is kept — it is the documented behaviour for
+a bare symbol — but the suffix is now checked against the SDK's five markets, so
+`700.XX` and `700.` are refused before a market-wide endpoint answers "no data"
+and reads as an empty market:
+
+```console
+$ go run ./cmd/fundamentals -action industry-rank -symbol 700.XX
+error: cannot read a market from -symbol "700.XX": "XX" is not a market code, want HK, US, CN, SG or UK (a symbol with no suffix means HK)
+```
+
+The macro country filter is deliberately **not** tightened the same way. A
+country is a different vocabulary from a market code — it has `EU` and `JP` and
+no `UK` — and it only narrows a list, so an unrecognised suffix such as the `SH`
+of `000001.SH` yields no filter rather than refusing the action.
+
+**4. `parseImportance` marks an unrecognised value.** The SDK's
+`MacroeconomicImportance` is a bare `int32`, so an absent level decodes to `0`,
+which the enum does not define. It used to print that `0` in the `IMPORT.`
+column, where it reads as a real measurement — and it now returns
+`unknown(n)`, exactly as `parseRecommend` and `parseElementType` already did for
+their siblings. The cases name the SDK constants rather than `1`/`2`/`3`, so a
+renumbering upstream shows up here instead of silently redefining what "high"
+means.
+
+**5. `fmtTimePtr` treats a zero time as absent.** A `*time.Time` field the API
+omits decodes to the zero time rather than to `nil`, so a nil check alone printed
+`0001-01-01 00:00:00` — a plausible-looking date. It is now `IsZero()`, and the
+renderer prints `-`, which is what `cmd/content` and `cmd/sharelist` already did
+in their `fmtTime` helpers.
 
 ---
 
@@ -1166,20 +1363,136 @@ LONGPORT_DCA_DRY_RUN=0 LONGPORT_MODE=live \
 | Flag | Default | Purpose |
 | --- | --- | --- |
 | `-action` | `list` | One of the eleven actions above. |
-| `-symbol` | — | **Required** for `create` and `calc-date`; optional filter for `stats`. |
-| `-amount` | — | Per-investment amount, decimal string. **Required** for `create`. |
-| `-frequency` | `monthly` | `daily`, `weekly`, `fortnightly` or `monthly`. |
-| `-day-of-week` | — | **Required** for `weekly`/`fortnightly`, e.g. `Monday`. |
-| `-day-of-month` | — | `1`-`31`, for `monthly`. Rejected above 31 locally. |
+| `-symbol` | `""` | **Required** for `create` and `calc-date`; optional filter for `stats`; comma-separated for `check-support`. Padded values are trimmed; a whitespace-only one is an error, not an omission. |
+| `-amount` | `""` | Per-investment amount, decimal string. **Required** for `create`, optional on `update` (absent = leave the amount alone). Padded values are trimmed; a whitespace-only one is an error. |
+| `-frequency` | `""` (effective default: `monthly`) | `daily`, `weekly`, `fortnightly` or `monthly`. See below — the **literal** flag default is the empty string and it must stay that way. |
+| `-day-of-week` | `""` | Weekday name, e.g. `Monday`. **Required** for `weekly`/`fortnightly`, **rejected** for `monthly` and `daily`. Padded values are trimmed; a whitespace-only one is an error. |
+| `-day-of-month` | `0` (unset) | `1`-`31`, for `monthly`. Rejected above 31 first, then rejected outright for `weekly`, `fortnightly` and `daily`. |
 | `-allow-margin` | `false` | Margin financing for a plan — real leverage. Guarded like any other write. |
-| `-plan-id` | — | **Required** for `update`, `pause`, `resume`, `stop`, `history`. |
-| `-reminder-hours` | — | **Required** for `set-reminder`; the SDK accepts `1`, `6` or `12`. |
+| `-plan-id` | `""` | **Required** for `update`, `pause`, `resume`, `stop`, `history`. Trimmed; whitespace-only is an error. |
+| `-reminder-hours` | `""` | **Required** for `set-reminder`; the SDK accepts `1`, `6` or `12`. Trimmed; whitespace-only is an error. |
 | `-confirm-live-dca` | `false` | **Required** for any write. |
 
-`-day-of-week` and `-day-of-month` are checked against `-frequency` locally:
-weekly/fortnightly without a weekday is rejected before any request, and
-supplying both is rejected, so you get a clear local error rather than an
-opaque one from the API.
+#### `-frequency` has no default, and that is deliberate
+
+The table above gives the **literal flag default** as `""`. The **effective**
+default is still monthly, because the validation resolves `""` to monthly before
+`parseFrequency` ever sees it. Those are two different things and the difference
+is the whole point:
+
+`doUpdate` builds a sparse `*dca.UpdateOptions` in which a nil pointer means
+"leave this field alone" — the SDK's own contract, *"Nil/zero fields are not
+sent"* (`dca/context.go`). The only way to express "leave the schedule alone" is
+therefore `if frequency != ""`. That guard used to be **always true**, because
+the flag layer handed it `"monthly"` when the user passed nothing at all. Every
+`-action update` therefore sent `invest_frequency: monthly`, and the command
+line
+
+```bash
+go run ./cmd/dca -action update -plan-id <id> -amount 2000 --confirm-live-dca
+```
+
+silently converted a **weekly** plan to a monthly one. The default is `""` now,
+and `TestRegisterFlags_TheDefaultsLeaveAnUpdateableScheduleUnspecified` pins it
+through the real flag set, including that exact command line. See
+[Honest status](#honest-status) for why the old unit tests passed while
+asserting the opposite.
+
+#### The schedule is cross-validated for every frequency
+
+The 1–31 range check on `-day-of-month` runs first. Then each frequency accepts
+**exactly its own** day field, and nothing else:
+
+| `-frequency` | `-day-of-week` | `-day-of-month` |
+| --- | --- | --- |
+| `daily` | rejected | rejected |
+| `weekly` | **required** | rejected |
+| `fortnightly` | **required** | rejected |
+| `monthly` (and `""`) | rejected | optional — the server picks the day |
+
+The error names the flag to drop, and all of this happens before any request:
+
+```console
+$ go run ./cmd/dca -action create -symbol 700.HK -amount 1000 \
+    -frequency weekly -day-of-week Monday -day-of-month 15
+error: -day-of-week and -day-of-month are mutually exclusive: -frequency weekly takes -day-of-week, so drop -day-of-month
+
+$ go run ./cmd/dca -action create -symbol 700.HK -amount 1000 \
+    -frequency monthly -day-of-week Monday
+error: -day-of-week is not used with -frequency monthly, which uses -day-of-month; pass -frequency weekly or fortnightly as well if the plan is weekly
+
+$ go run ./cmd/dca -action create -symbol 700.HK -amount 1000 \
+    -frequency daily -day-of-week Monday
+error: -day-of-week is not used with -frequency daily, which runs every trading day; drop -day-of-week
+
+$ go run ./cmd/dca -action create -symbol 700.HK -amount 1000 \
+    -frequency monthly -day-of-week Monday -day-of-month 15
+error: -day-of-week and -day-of-month are mutually exclusive: -frequency monthly takes -day-of-month, so drop -day-of-week
+
+$ go run ./cmd/dca -action create -symbol 700.HK -amount 1000 \
+    -frequency daily -day-of-month 15
+error: -day-of-month is not used with -frequency daily, which runs every trading day; drop -day-of-month
+```
+
+This used to be half true. The mutual-exclusion check existed **only** for
+`monthly`, so `weekly` with both flags was accepted, and `daily` was not
+cross-validated at all. The API *ignores* the day field that does not match the
+frequency rather than rejecting it, so the result of that gap was not an error
+but a plan silently running on a schedule the command line never described.
+
+**`update` runs the identical validation.** It used to bypass it completely, so
+`-action update -day-of-month 99` reached the request. One consequence is worth
+knowing before you use it:
+
+> An update that moves only the weekday must also pass `-frequency weekly`.
+> The command cannot read the plan's real frequency without a `List` call, and
+> reading before the gate would break the promise this repo keeps everywhere
+> else — that a refused write makes **no** network call at all. Naming the
+> frequency explicitly keeps the request self-consistent instead of asking the
+> API to choose between two contradictory day fields.
+
+```console
+$ go run ./cmd/dca -action update -plan-id 1 -amount 2000
+[config] mode=simulated … dry_run=true …
+[config] dca_dry_run=true (dedicated gate: LONGPORT_DCA_DRY_RUN + --confirm-live-dca + LONGPORT_MODE=live)
+
+[DRY-RUN] request that would be sent:
+[DRY-RUN]   allow_margin       -
+[DRY-RUN]   day_of_month       -
+[DRY-RUN]   day_of_week        -
+[DRY-RUN]   endpoint           POST /v1/dailycoins/update
+[DRY-RUN]   invest_frequency   -          <-- the schedule is untouched
+[DRY-RUN]   per_invest_amount  2000
+[DRY-RUN]   plan_id            1
+… BLOCKED by the DCA safety gate. Nothing was sent to Longbridge.
+$ # exit 3
+
+$ go run ./cmd/dca -action update -plan-id 1 -day-of-week Monday --confirm-live-dca
+error: -day-of-week is not used with -frequency monthly, which uses -day-of-month; pass -frequency weekly or fortnightly as well if the plan is weekly
+
+$ go run ./cmd/dca -action update -plan-id 1 -frequency weekly -day-of-week Tuesday --confirm-live-dca
+[DRY-RUN]   day_of_week        Tuesday
+[DRY-RUN]   invest_frequency   Weekly
+… # accepted, and the request now goes out
+```
+
+The first block is the whole bug in one screen. `invest_frequency -` means the
+sparse `UpdateOptions` left the frequency `nil`, which is what the SDK
+documents as "do not send". Before the fix, that same command line printed
+`invest_frequency Monthly` and converted the plan.
+
+#### A blank flag is a flag error, not a gate refusal
+
+Every string flag in `cmd/dca` distinguishes three inputs that a bare `s == ""`
+test runs together: **absent** (leave the flag out), **padded** (`" 6 "`, a typo
+— trimmed and accepted), and **blank** (`"   "`, neither — an error naming the
+flag). The third case used to be read as an omission, which meant a blank
+`-plan-id` reached the gate and was refused with a message about the three
+safety switches. That is the more misleading of the two outcomes in a command
+whose exit 3 means "a gate protected you": the user is told the demo declined
+rather than that they left an argument empty. It is now exit **1** and it names
+the flag. `cmd/trade` does the same for `-symbol`, `-order-id` and `-price`
+(`-price "   "` would otherwise become a **zero** limit price).
 
 **There is no preview mode in the SDK.** There is no plan/preview method —
 `Create` creates the plan directly, and it starts investing on the schedule.
@@ -1241,7 +1554,7 @@ LONGPORT_ALERT_DRY_RUN=0 LONGPORT_MODE=live \
 | `-symbol` | — | **Required** for `add`. |
 | `-condition` | `price-rise` | `price-rise`, `price-fall`, `percent-rise`, `percent-fall`. |
 | `-value` | — | Trigger threshold, decimal string. **Required** for `add`. |
-| `-frequency` | `once` | `daily`, `every-time` or `once`. |
+| `-frequency` | `once` | `daily`, `every-time` or `once`. Padded values are trimmed; a whitespace-only one is an error rather than the default. |
 | `-id` | — | **Required** for `update` and `delete`. |
 | `-enabled` | `true` | For `update`: enable or disable the alert. |
 | `-confirm-live-alert` | `false` | **Required** for any write. |
@@ -1251,6 +1564,26 @@ so the rendering in `-action list` and the dry-run preview is a pretty-printer,
 not a field mapping. `Delete` is irreversible: there is no undelete endpoint,
 and recreating the alert yields a new id and loses its trigger state, which the
 dry-run `WARNING` line says out loud.
+
+Two small things about the parsers, both of which look like trivia and are not:
+
+- **A whitespace-only `-frequency` is an error, not the default.** It used to
+  trim to `""` and fall through to the documented default `once`, which made a
+  flag the user got wrong look exactly like one they never passed. Padding a
+  real word (`" Once "`) is still normalised — that is a typo, not a value.
+- **Both of `cmd/alert`'s enums are safe to return `0` on error, and that is
+  checked rather than assumed.** `AlertCondition` and `AlertFrequency` both
+  start at **1** in the SDK, so the zero value is not a member of either and
+  cannot be a wrong-but-valid trigger. That is not the same property the
+  0-based enums in `cmd/dca` and `cmd/fundamentals` have, and it would stop
+  being true the moment the SDK renumbered, so a test pins the numbering. The
+  error paths in *this* command still return `0`; it does not need a sentinel,
+  and the tests say which is which.
+
+`findAlert` also no longer panics on a nil list — it returns not-found, exactly
+as it does for an empty one, and `doUpdate` stops before it can send anything.
+The input was unreachable from the CLI; the test that used to document the panic
+has been inverted.
 
 ---
 
@@ -1271,10 +1604,12 @@ and one is a `POST` that queries:
 oversight.** The `POST` is a query: it takes a market, a filter list and a page
 and returns matching securities. It is the same shape as `TopMovers` in
 `cmd/market`, which is likewise a `POST` and likewise unguarded. Nothing
-server-side changes. As in `cmd/market`, `cmd/fundamentals` and
-`cmd/warrant`, the startup banner asserts the **order** gate is still closed, so
-running the screener with dry run off and mode live refuses to start rather than
-proceeding in a misconfigured environment.
+server-side changes. As in `cmd/market`, `cmd/fundamentals` and `cmd/warrant`,
+the startup banner asserts the **order** gate is still closed, so running the
+screener with dry run off and mode live refuses to start rather than
+proceeding in a misconfigured environment. Eight binaries carry that assertion
+in total; see
+[the read-only invariant](#the-read-only-invariant-eight-binaries-assert-it).
 
 ```bash
 go run ./cmd/screener -action indicators                    # the indicator catalogue
@@ -1519,6 +1854,20 @@ Every guarded command uses it: `trade` (submit/replace/cancel),
 `sharelist` (create/delete/add/remove/sort) and `content`
 (create-topic/reply).
 
+Two things keep landing on the wrong code, so both are now stated as rules:
+
+- **A bad flag value is 1, not 3.** A flag that is present but blank —
+  `-symbol "   "` — used to be trimmed to `""` and read as "not supplied", which
+  for `cmd/dca` and `cmd/trade` meant it reached a gate and was refused there.
+  A reader seeing exit 3 reasonably concludes *"a safety gate protected me"*,
+  when in fact they left an argument empty. Blank string flags are now named
+  errors and exit **1**, before any gate is consulted. Padded values are still
+  trimmed and accepted.
+- **A read-only binary with the order gate open is 1, not 3.** Exit 3 is
+  reserved for a *guard refusing a write*; a reader that refuses to start is not
+  that. See
+  [the read-only invariant](#the-read-only-invariant-eight-binaries-assert-it).
+
 ### Secret handling
 
 `app_secret` and `access_token` are never printed or logged, not even
@@ -1661,8 +2010,19 @@ What *was* verified by execution:
 
 - `gofmt -l .` reports nothing.
 - `go build ./...` and `go vet ./...` both exit 0.
-- The test suite passes: 118 test functions, 584 passing cases including
-  subtests, one helper-process test skipped. See [Development](#development).
+- The test suite passes: **435** test functions across **15** packages,
+  **2 477** passing cases including subtests, one helper-process test skipped.
+  See [Development](#development).
+- The suite is green under `-race`, `-count=2` and `-shuffle=on`, under a
+  deliberately hostile `env -i` environment, with poisoned
+  `LONGBRIDGE_*`/`LONGPORT_*` values set, and with a stray credentialed
+  `config.yaml` dropped in both the repository root and `cmd/dca/`.
+- Every new test assertion was **mutation-checked**: the production code was
+  reverted with the tests kept, and 16 of the 18 mutations tried turn the suite
+  red with the specific test that was written for them. The two that do not are
+  the new read-only invariant assertions, which live in `main()` and are
+  therefore invisible to the suite; that gap is named rather than glossed, under
+  [Development](#development).
 - All **fifteen** binaries build; `-h` exits 0 with no credentials.
 - All fifteen exit **2** with a readable missing-credentials message listing all
   three variables, and no panic.
@@ -1836,6 +2196,30 @@ is unchanged at 3; the *mechanism* is now shared, which is what makes
 `declaredGuards()` able to validate all four `WriteGuard` switches in
 `config.Load` at startup.
 
+And a fourth, and the one worth reading twice because it is a lesson about
+testing rather than about DCA. `cmd/dca -action update` registered its
+`-frequency` flag with the default `"monthly"`, while `doUpdate` encodes "leave
+the plan's schedule alone" as `if frequency != ""`. With a non-empty default
+that guard was **always true**, so the example command in this very README —
+
+```bash
+go run ./cmd/dca -action update -plan-id <id> -amount 2000 --confirm-live-dca
+```
+
+— sent `invest_frequency: monthly` on every single update and silently
+**converted a weekly plan to a monthly one**. The unit tests did not catch it,
+and could not have: they set the package-level `frequency` variable directly, so
+they never went through the flag layer, and they were in fact asserting the
+*opposite* of what the shipped binary did. This is the shape of bug a test suite
+is structurally blind to — the code under test was not the code that ran.
+
+The default is now `""`, which still means monthly inside the validation, and
+the `dca` flag table under [Commands](#commands) distinguishes the two. The
+suite was then mutation-checked — production code reverted, new tests kept, each
+assertion confirmed to fail — which is what makes this a recorded lesson rather
+than a story. Every other fix from this pass is documented in its own command's
+section, and the coverage caveats are under [Development](#development).
+
 An earlier version of this README said there was no automated test suite. That
 is no longer true, and it was never true of the parts that matter most. See
 [Development](#development).
@@ -1844,58 +2228,166 @@ is no longer true, and it was never true of the parts that matter most. See
 
 ## Development
 
-There is a test suite. It covers the two packages where a mistake is silent and
-dangerous — `internal/config` (the loader and all six gates) and `internal/cli`
-(the exit-code mapping).
+There is a test suite, and it now covers **15 of the 17 packages in the repo** —
+`internal/config`, `internal/cli`, and thirteen `cmd/*` binaries. Only
+`cmd/portfolio` and `cmd/watch` have no test file.
 
 ```bash
 go test ./...                                        # everything
 go test -race ./...                                  # the same, with the race detector
-go test -cover ./internal/...                        # coverage per package
-go test -shuffle=on ./internal/config/               # order independence
-go test -run 'Gate|Unsafe|Unknown' ./internal/config/ -v
+go test -cover ./...                                 # coverage per package
+go test -shuffle=on ./...                            # order independence
+go test -count=2 ./...                               # no state leaks between runs
+go test -run 'Parser|Enum|Sentinel' ./... -v         # the enum-conversion suites
 ```
 
 There is **no `make test` target** in this repo's `Makefile` — use `go test`
-directly, or `make all` for `fmt + vet + build`. (The sibling `tiger-go-demo`
-does have `make test`; the two Makefiles are not kept in step.)
+directly, or `make all` for `fmt + vet + build`. Check with `make help`; the
+target list is `build`, `fmt`, `fmt-check`, `vet`, `tidy`, `clean`, `help` and
+fourteen `run-*`. (The sibling `tiger-go-demo` does have `make test`; the two
+Makefiles are not kept in step.)
 
-| Package | Test functions | Statement coverage |
-| --- | --- | --- |
-| `internal/config` | 81 | **100.0%** |
-| `internal/cli` | 37 | **98.6%** |
-| **Total** | **118** | — |
+### The numbers
 
-That is 118 test functions expanding to **584 passing cases** including
-subtests (one `TestHelperProcess` is a subprocess helper and is skipped
-normally). The `cmd/*` packages have no tests — they are thin flag-and-print
-shells over the SDK, and the interesting logic they contain is the flag
-validation, which is checked by running them with bad flags and reading the exit
-code.
+| Package | Test functions | Cases executed | Statement coverage |
+| --- | --- | --- | --- |
+| `internal/config` | 81 | 466 | **100.0%** |
+| `cmd/fundamentals` | 62 | 414 | 19.8% |
+| `internal/cli` | 39 | 121 (120 pass + 1 skip) | **98.6%** |
+| `cmd/warrant` | 36 | 254 | 55.6% |
+| `cmd/dca` | 35 | 174 | 48.8% |
+| `cmd/market` | 27 | 150 | 21.1% |
+| `cmd/sharelist` | 27 | 120 | 36.1% |
+| `cmd/alert` | 25 | 121 | 44.2% |
+| `cmd/trade` | 23 | 129 | 35.7% |
+| `cmd/screener` | 20 | 135 | 41.4% |
+| `cmd/content` | 16 | 92 | 31.0% |
+| `cmd/executions` | 16 | 115 | 17.2% |
+| `cmd/reference` | 16 | 100 | 8.6% |
+| `cmd/quote` | 8 | 60 | 11.9% |
+| `cmd/watchlist` | 4 | 27 | 3.2% |
+| **Total** | **435** | **2 478** (2 477 pass + 1 skip) | — |
+
+Sorted by test functions. `cmd/portfolio` and `cmd/watch` have no test file and
+so appear in no row; `go test -cover ./...` reports them at 0.0%.
+
+"Test functions" counts `func TestXxx` declarations; "cases executed" counts
+every test case the runner actually entered, subtests included. The one skip is
+`TestHelperProcess` in `internal/cli`, a subprocess helper that is only
+meaningful when re-executed by its parent. To reproduce the totals:
+
+```console
+$ go test -count=1 -v ./... 2>&1 | grep -cE '^\s*--- PASS'
+2477
+$ go test -count=1 -v ./... 2>&1 | grep -cE '^\s*--- SKIP'
+1
+$ grep -rhE '^func Test' --include='*_test.go' . | wc -l
+435
+$ go test -cover ./... | wc -l
+17
+$ make build && ls bin | wc -l
+15
+```
+
+`internal/config` is at **100.0% of statements**. `internal/cli` is at **98.6%**,
+and the single uncovered statement is `internal/cli/cli.go:141` — the `return
+cfg` on `Usage.Load`'s **credentialed success path**. It is unreachable from a
+test that has no real credentials, because the only way past the `Load` error
+branch is a successful `appcfg.Load`. The failure path on the line above
+(`Fail(err)`) *is* covered.
+
+### The `cmd/*` coverage numbers mean less than they look
+
+**Read the per-package percentages in that table as "how much of the flag and
+parse layer is tested", not as "how much of the binary is tested".** The range
+is wide and the low end is low: 3.2% for `cmd/watchlist`, 8.6% for
+`cmd/reference`, 11.9% for `cmd/quote`, 17.2% for `cmd/executions`, 19.8% for
+`cmd/fundamentals`. The 55.6% at the top of the range is the most-covered
+package, not a typical one.
+
+The reason is structural, and it is not going to change. The `print*` functions
+take a **live SDK context** — `printBrokerHolding(ctx, mc *market.MarketContext)`,
+`printStatements(ctx, ac *asset.AssetContext)`, and so on, one per SDK method.
+The SDK offers **no seam** to fake one: it is a concrete struct over a concrete
+HTTP client and websocket, there is no interface to substitute, and there is no
+exported constructor that takes a transport. A test that wants to exercise
+`printBrokerHolding` therefore has to hold a real `*market.MarketContext`, which
+means credentials and a network round trip. **143 functions in this repo are at
+0.0% statement coverage**: all 15 `main()` functions, and 86 of the 110 `print*`
+functions — the rest of that list is `do*` and `execute` bodies that sit behind
+the same wall.
+
+So the `cmd/*` suites deliberately aim at the part that is testable and that
+bites: **the conversion of the SDK's bare-`int` enums, and the flag validation
+in front of them.** This README's own rule is that an unrecognised value must be
+an error "rather than a silent zero", because a wrong cast "would quietly return
+the wrong data". Every one of those `switch` statements previously had **zero**
+tests. The new suites assert, for each parser:
+
+- the **exact SDK constant** for every accepted value, not merely "no error" —
+  so a parser that returns the right *type* and the wrong *member* fails;
+- that unrecognised values are **rejected**, including the near-misses that a
+  `strings.TrimSpace(strings.ToLower(...))` implementation gets wrong: wrong
+  case, whitespace padding, and a value that is perfectly valid for a
+  *different* parser in the same file (`-sort-order asc` fed to
+  `parseSortBy`, `weekly` fed to `cmd/alert`'s `parseFrequency`, `monthly` fed
+  to `parseCondition`, and so on);
+- that the **value returned alongside an error is not itself a valid member of
+  the enum.** This is the part that is easy to get wrong. Several of these
+  parsers used to `return 0, err`, and for a `int` enum whose first member is
+  `iota` — `dca.DCAFrequencyDaily`, `calendar.CalendarCategoryReport`,
+  `fundamental.FinancialReportKindIncomeStatement` — the zero value *is* a valid
+  member and, in two cases, the documented default besides. A caller that
+  ignored the error would then have created a daily DCA plan or listed earnings
+  reports, silently, under a heading built from the word the user actually typed.
+  The error path now returns a sentinel outside the valid range
+  (`dcaFrequencyInvalid = -1`, `calendarCategoryInvalid = -1`,
+  `financialReportKindInvalid = -1`), and a test asserts the sentinel really is
+  outside the enum **and** pins the SDK's own numbering, so an SDK that ever
+  added a negative member would fail there rather than quietly making the
+  sentinel valid.
+- `cmd/alert` is the exception that proves the rule: both its enums are
+  **1-based** in the SDK, so `0` cannot be a member and its error returns are
+  already safe. That property is not left as a comment — it is pinned, because
+  it is the thing that would quietly stop being true if the SDK ever
+  renumbered.
+
+### Hermeticity
 
 The suite runs with **no credentials and no network**, and that is enforced
 rather than assumed:
 
-- **Hermetic under `-shuffle`.** Every test in `internal/config` calls a
-  `sandbox(t)` helper that gives it a private `t.TempDir()` working directory
-  and clears all 24 `LONGBRIDGE_*` / `LONGPORT_*` variables the package or the
-  SDK reads, then restores the previous state on cleanup. There are no
-  `t.Parallel()` tests, because `t.Setenv` and `t.Chdir` forbid them.
+- **Green under `-race`, `-count=2` and `-shuffle=on`.** All three were run
+  over the whole module, not just `internal/config`.
+- **No `t.Parallel()` anywhere that touches process state.** There is no
+  `t.Parallel()` call in the repo at all. It could not be used: `applyEnvOverrides`
+  mutates the process environment with `os.Setenv`, and `t.Setenv` and `t.Chdir`
+  forbid a parallel test outright.
 - **Immune to a polluted shell.** The suite was run with
   `LONGBRIDGE_APP_KEY=leak LONGBRIDGE_APP_SECRET=leak LONGBRIDGE_ACCESS_TOKEN=leak
   LONGPORT_MODE=bogus LONGPORT_DRY_RUN=maybe LONGPORT_DCA_DRY_RUN=maybe …` in
   the environment and still passed. `sandbox(t)` unsets everything, and
   `restoreEnv` puts it back, including the variables `applyEnvOverrides` writes
   directly with `os.Setenv` and which would therefore outlive `t.Setenv`.
-- **Immune to a stray `config.yaml`.** A real `config.yaml` with credentials
-  was dropped in the repository root and the suite still passed, because
-  `sandbox(t)` changes into a temp directory first.
+- **Immune to a hostile environment.** The suite also passes under `env -i`
+  with a `HOME` that does not exist, no `LONGPORT_*` variable set at all, and
+  every `LONGBRIDGE_*` credential present but **empty** (which is a different
+  case from unset, and the one a real misconfiguration produces).
+- **Immune to a stray `config.yaml`.** A real `config.yaml` with credentials was
+  dropped in the repository root, and again in `cmd/dca/`, and the suite still
+  passed, because `sandbox(t)` changes into a `t.TempDir()` working directory
+  first. That helper clears all **36** `LONGBRIDGE_*` / `LONGPORT_*` variables
+  the package or the SDK reads — the credentials in both spellings, the seven
+  demo safety switches, the endpoints, and the protocol tuning knobs.
 
-What the tests actually pin, in rough order of value:
+### What the tests pin, in rough order of value
 
-- The **exit-code mapping** in `cli.Fail` — 0/1/2/3, and specifically that a
+- **Every SDK enum parser maps each accepted value to the right constant**, and
+  refuses everything else, as described above. This is the bulk of the new
+  `cmd/*` suites.
+- **The exit-code mapping** in `cli.Fail` — 0/1/2/3, and specifically that a
   `flag` parse error is **1** while only a `MissingCredentialError` is **2**.
-  The mapping is also executed for real, by re-running the test binary as a
+  The mapping is executed for real, by re-running the test binary as a
   subprocess and checking the actual exit status.
 - **Every gate's refusal is fail-closed**: unset and unparseable
   `*_DRY_RUN` both mean "dry run", a missing flag refuses even with the env
@@ -1908,19 +2400,87 @@ What the tests actually pin, in rough order of value:
   and not the other, fails the suite immediately. Go offers no constant structs
   and therefore no compile-time freeze, and this is the closest available
   substitute.
+- **The DCA schedule cross-validation**, in full: each frequency accepts
+  exactly its own day field, and the error names the flag to drop.
+- **A blank flag is a flag error, not a gate refusal.** `-symbol "   "` in
+  `cmd/dca` and `cmd/trade` must exit **1** with the flag named, never **3**
+  with a message about the three switches.
 - **The credential precedence rules**: environment beats file, canonical
   `LONGBRIDGE_*` beats deprecated `LONGPORT_*`, and the error message lists
   *every* missing variable rather than the first.
 - **The YAML-only config rule**: the candidate list is exactly
   `config.yaml`, `config.local.yaml`; a `.yml` or `.toml` explicit path is
   rejected, and the extension is checked *before* the file is stat'ed.
-- **Formatting helpers** in `cli`: `Dec`/`Dec4` render `nil` as `-` and zero as a
-  real figure, `Truncate` never emits a broken rune, `Redact` does not leak the
-  length of a long secret.
+- **Formatting helpers** in `cli` and in the commands: `Dec`/`Dec4` render `nil`
+  as `-` and zero as a real figure, `Truncate` never emits a broken rune or
+  slices at a negative index, `Redact` does not leak the length of a long
+  secret, and `fmtTimePtr`/`fmtTime` render a zero `time.Time` as `-` rather
+  than as `0001-01-01`.
+- **Previously-panicking inputs are safe**: `findAlert` on a nil list returns
+  not-found, and `truncate` with a non-positive width returns an ellipsis.
+  Both inputs were unreachable from the CLI; the tests that used to assert the
+  panic have been inverted to assert the new behaviour, so the contract is now
+  stated rather than implied.
 
-The two guards most likely to be wrong in a way a test would catch — the order
-gate and the reusable `WriteGuard` — are the two with the most table-driven
-cases.
+### What the tests do *not* cover
+
+Stated plainly, because the percentages above invite the wrong conclusion:
+
+- **None of the 8 read-only invariant assertions is test-covered.** All eight
+  binaries (`quote`, `watch`, `warrant`, `reference`, `portfolio`,
+  `fundamentals`, `market`, `screener`) refuse to start when the order gate is
+  open, and no test can see it: the check is in `main()`, and `main()` is
+  untestable for the same reason the `print*` functions are. This was checked by
+  mutation — deleting each of the eight assertions in turn leaves the suite
+  **green**. That is a real gap, and it is the one most likely to be mistaken
+  for coverage.
+- **No `print*` function, and no `main()` in any `cmd/*` package.** All 15
+  `main()` functions and 86 of the 110 `print*` functions are at 0.0%.
+- **Nothing about a successful response.** The suite never opens a socket, so
+  the "written from the SDK's struct definitions alone" caveat under
+  [Honest status](#honest-status) is unchanged by any of this.
+
+### The suite has been mutation-checked
+
+A test that cannot fail proves nothing, so every new assertion was re-checked by
+**reverting the production code and keeping the tests**: apply the old
+behaviour, confirm the suite goes red, put the fix back.
+
+Sixteen of the eighteen mutations tried go red exactly as predicted, naming the
+test that was written for them. The headline case is the `-frequency` default:
+
+```console
+$ # put u.FS.StringVar(&frequency, "frequency", "monthly", …) back, keep the tests
+$ go test -count=1 ./cmd/dca/
+--- FAIL: TestRegisterFlags_TheDefaultsLeaveAnUpdateableScheduleUnspecified
+    --- FAIL: …/no_flags_at_all
+    --- FAIL: …/the_README's_amount-only_update
+    --- FAIL: …/a_create_that_says_nothing_about_the_schedule
+FAIL	github.com/shing1211/longbridge-go-demo/cmd/dca
+```
+
+The other fifteen that turn red: dropping the `weekly` day-of-month rejection;
+dropping the `daily` branch; reading a blank optional flag as an omission;
+restoring the zero-value sentinel; restoring `strings.Contains(s, ".")` in
+`cmd/sharelist`; restoring `rct_%d` in the broker heading; duplicating the
+vocabulary in `validateFlags` again; dropping the startup `-indicator` check;
+unvalidating `marketFromSymbol`; comparing the raw `-statement-type` string;
+returning the bare number from `parseImportance`; dropping `IsZero` from
+`fmtTimePtr`; dropping the `-sort-order` trim; making `findAlert` panic on a nil
+list again; and dropping the `truncate` boundary guard. Each of those failures
+came from a distinct named test, not from a generic compile error.
+
+**The two that do not turn red are the two new read-only assertions.** Deleting
+the `GuardWrite` check from `cmd/market` — or from `cmd/watch`, or from any of
+the other six that have one — leaves the suite **green**. That is not a
+defect in the mutation check; it is the mutation check reporting a real gap, and
+it is listed under
+[what the tests do not cover](#what-the-tests-do-not-cover) rather than
+smoothed over here.
+
+The reason this matters is in [Honest status](#honest-status): the `-frequency`
+default is precisely the class of bug a unit-test suite is **structurally blind
+to**, and the mutation check is the only thing in this repo that could see it.
 
 ---
 
@@ -2001,17 +2561,23 @@ longbridge-go-demo/
 │   │   ├── guard.go        the separate watchlist gate; exit-3 refusal type
 │   │   ├── writeguard.go   the reusable WriteGuard behind the dca/alert/sharelist/content gates
 │   │   ├── file.go         YAML-only credential file loader
-│   │   └── *_test.go       81 test functions, 100% statement coverage
+│   │   └── *_test.go       81 test functions, 466 cases, 100.0% statement coverage
 │   └── cli/                shared flag parsing, credential errors, panic guard
 │       ├── cli.go
-│       ├── cli_test.go     26 test functions
+│       ├── cli_test.go     28 test functions
 │       └── fail_test.go    11 test functions, incl. real subprocess exit codes
 ├── .env.example            every LONGPORT_*/LONGBRIDGE_* var, fully commented
 ├── config.example.yaml     YAML template, `longbridge:` block
-├── Makefile                build, fmt, fmt-check, vet, tidy  (no `test` target)
+├── Makefile                build, fmt, fmt-check, vet, tidy, clean  (no `test` target)
 ├── go.mod / go.sum
 └── README.md
 ```
+
+`cmd/*/main_test.go` (and `cmd/fundamentals/actions_test.go`) hold the 315
+test functions and 1 891 cases for the thirteen binaries that have a suite; see
+[Development](#development) for the per-package table and for why the coverage
+percentages there are lower than they look. `cmd/portfolio` and `cmd/watch` have
+no test file.
 
 Fifteen `cmd/` directories, fifteen `binaries` in the `Makefile`'s `BINARIES`
 list, and fifteen `run-*` targets.
