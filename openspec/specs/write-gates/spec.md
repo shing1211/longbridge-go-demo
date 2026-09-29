@@ -42,7 +42,7 @@ Order writes SHALL be sent only when `LONGPORT_DRY_RUN=0` (or `false`), `--confi
 
 ### Requirement: The watchlist gate requires dry run off and an explicit flag
 
-Watchlist group writes SHALL be sent only when `LONGPORT_WATCHLIST_DRY_RUN=0` (or `false`) and `--confirm` is passed. `LONGPORT_MODE=live` SHALL NOT be required. A refusal SHALL exit `3`.
+Watchlist group writes SHALL be sent only when `LONGPORT_WATCHLIST_DRY_RUN=0` (or `false`) and `--confirm` is passed. `LONGPORT_MODE=live` SHALL NOT be required. A refusal SHALL exit `3`. Listing the saved groups SHALL NOT be gated by either switch: it SHALL return its normal result whatever state the gate is in.
 
 #### Scenario: The default refuses a watchlist write
 
@@ -68,6 +68,11 @@ Watchlist group writes SHALL be sent only when `LONGPORT_WATCHLIST_DRY_RUN=0` (o
 
 - **WHEN** a watchlist write is refused by the gate
 - **THEN** no client is constructed and no request is issued, and the request that would have been sent is printed instead
+
+#### Scenario: Listing the saved groups is not gated
+
+- **WHEN** `-action list` is run with `LONGPORT_WATCHLIST_DRY_RUN` unset, `1`, `0` or `false`, and with or without `--confirm`
+- **THEN** the read proceeds and reports the saved groups as usual, no refusal is printed, and the process does not exit `3`
 
 ### Requirement: The recurring investment gate requires dry run off, an explicit flag, and live mode
 
