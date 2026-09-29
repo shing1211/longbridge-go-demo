@@ -8,6 +8,7 @@ import (
 	"time"
 
 	sdk "github.com/longbridge/openapi-go/config"
+	"github.com/longbridge/openapi-go/oauth"
 )
 
 // ---------------------------------------------------------------- helpers --
@@ -911,5 +912,207 @@ func TestLoad_NeverTouchesTheNetwork(t *testing.T) {
 	}
 	if cfg.SDK.OAuthClient != nil {
 		t.Error("Load must not build an OAuth client")
+	}
+}
+
+// ---------------------------------------------------------------- LoadOAuth --
+
+// The premise of LoadOAuth: an operator must be able to obtain an OAuth token
+// BEFORE they have an app-key credential, because the OAuth client ID is
+// issued on the same User Center page and not from the same generated triple.
+// Requiring the triple here would invert that order for no reason — the SDK's
+// own check() returns early once OAuthClient is set.
+func TestLoadOAuth_NeedsNoAppKeyCredentialTriple(t *testing.T) {
+	sandbox(t)
+	o := oauth.New("client-id")
+
+	cfg, err := LoadOAuth(o, "")
+	if err != nil {
+		t.Fatalf("LoadOAuth with no credentials at all = %v, want it to succeed", err)
+	}
+	if cfg.SDK == nil {
+		t.Fatal("the SDK config must be built")
+	}
+	if cfg.SDK.OAuthClient != o {
+		t.Error("the SDK config must carry the OAuth client, or the token is never used")
+	}
+	// Not a *MissingCredentialError: nothing is missing. Reporting it as one
+	// would exit 2 and print remedy text about the app-key triple.
+	var mce *MissingCredentialError
+	if asMissingCredentialError(err, &mce) {
+		t.Errorf("err = %T, want nil", err)
+	}
+}
+
+// The rest of the contract: same mode, same dry-run state, same banner, so the
+// read-only assertion this config is used with is evaluated against a real
+// configuration rather than a stand-in.
+func TestLoadOAuth_LoadsTheSameGateStateAsLoad(t *testing.T) {
+	sandbox(t)
+	cfg, err := LoadOAuth(oauth.New("client-id"), "")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.Mode != ModeSimulated {
+		t.Errorf("Mode = %q, want the simulated default", cfg.Mode)
+	}
+	if !cfg.DryRun {
+		t.Error("DryRun must default to true, or AssertReadOnly has no gate to check")
+	}
+	if err := cfg.GuardWrite("run the OAuth login"); err == nil {
+		t.Error("GuardWrite admitted the default config, so the order gate is not " +
+			"closed and AssertReadOnly would exit 1 on a normal run")
+	}
+	if !strings.Contains(cfg.String(), "dry_run=true") {
+		t.Errorf("the banner must show the gate state:\n%s", cfg.String())
+	}
+	if !strings.Contains(cfg.String(), "app_key="+Redact("")) {
+		t.Errorf("the banner must still show the app key field, masked as unset:\n%s", cfg.String())
+	}
+}
+
+func TestLoadOAuth_CarriesTheAppKeyForTheBannerOnly(t *testing.T) {
+	sandbox(t)
+	t.Setenv("LONGBRIDGE_APP_KEY", "abcdefghijklmnop")
+
+	cfg, err := LoadOAuth(oauth.New("client-id"), "")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.AppKey != "abcdefghijklmnop" {
+		t.Errorf("AppKey = %q, want the key from the environment so the banner is not a lie", cfg.AppKey)
+	}
+	// The env wins over the file, as it does in Load.
+	if err := os.WriteFile("config.yaml", []byte("longbridge:\n  app_key: from-file\n"), 0o600); err != nil {
+		t.Fatalf("writing config.yaml: %v", err)
+	}
+	cfg, err = LoadOAuth(oauth.New("client-id"), "")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.AppKey != "abcdefghijklmnop" {
+		t.Errorf("AppKey = %q, want the environment to win over the file", cfg.AppKey)
+	}
+	// And a key that exists only in the file is picked up too, so the same
+	// precedence holds in both directions.
+	if err := os.Unsetenv("LONGBRIDGE_APP_KEY"); err != nil {
+		t.Fatalf("clearing LONGBRIDGE_APP_KEY: %v", err)
+	}
+	if err := os.Unsetenv("LONGPORT_APP_KEY"); err != nil {
+		t.Fatalf("clearing LONGPORT_APP_KEY: %v", err)
+	}
+	cfg, err = LoadOAuth(oauth.New("client-id"), "")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.AppKey != "from-file" {
+		t.Errorf("AppKey = %q, want the key from config.yaml", cfg.AppKey)
+	}
+	if cfg.Source != "config.yaml" {
+		t.Errorf("Source = %q, want the file it was read from", cfg.Source)
+	}
+}
+
+// The secret and the access token are left empty on purpose: neither exists on
+// the OAuth path, and asking for them would report a missing credential that is
+// not one.
+func TestLoadOAuth_LeavesTheSecretAndTokenEmpty(t *testing.T) {
+	sandbox(t)
+	cfg, err := LoadOAuth(oauth.New("client-id"), "")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.AppSecret != "" || cfg.AccessToken != "" {
+		t.Errorf("AppSecret = %q, AccessToken = %q, want both empty: the OAuth "+
+			"flow is authorised by the client ID", cfg.AppSecret, cfg.AccessToken)
+	}
+}
+
+// The dry-run switches are validated here even though this loader's only
+// consumer issues no writes, because every other binary validates them and a
+// bad value should fail at startup rather than in an unrelated command later.
+func TestLoadOAuth_ValidatesTheDryRunSwitches(t *testing.T) {
+	sandbox(t)
+	t.Setenv("LONGPORT_CONTENT_DRY_RUN", "bad")
+	if _, err := LoadOAuth(oauth.New("client-id"), ""); err == nil {
+		t.Fatal("LoadOAuth accepted a malformed LONGPORT_CONTENT_DRY_RUN; a value " +
+			"that cannot be parsed is a startup failure everywhere else")
+	}
+}
+
+// Every startup failure Load reports, LoadOAuth reports too. The switches are
+// validated before the SDK is asked for anything, so a typo in one is a plain
+// error naming the variable rather than something that surfaces later.
+func TestLoadOAuth_EveryStartupFailureLoadReportsItReportsToo(t *testing.T) {
+	tests := []struct {
+		name    string
+		env     string
+		val     string
+		wantErr string
+	}{
+		{"bad mode", "LONGPORT_MODE", "sandbox", `invalid LONGPORT_MODE="sandbox"`},
+		{"bad dry run", "LONGPORT_DRY_RUN", "maybe", `invalid LONGPORT_DRY_RUN="maybe"`},
+		{"bad watchlist dry run", "LONGPORT_WATCHLIST_DRY_RUN", "sure", `invalid LONGPORT_WATCHLIST_DRY_RUN="sure"`},
+		{"bad dca dry run", "LONGPORT_DCA_DRY_RUN", "0 0", `invalid LONGPORT_DCA_DRY_RUN="0 0"`},
+		{"bad alert dry run", "LONGPORT_ALERT_DRY_RUN", "nope", `invalid LONGPORT_ALERT_DRY_RUN="nope"`},
+		{"bad sharelist dry run", "LONGPORT_SHARELIST_DRY_RUN", "0 0", `invalid LONGPORT_SHARELIST_DRY_RUN="0 0"`},
+		{"bad content dry run", "LONGPORT_CONTENT_DRY_RUN", "maybe", `invalid LONGPORT_CONTENT_DRY_RUN="maybe"`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			sandbox(t)
+			t.Setenv(tt.env, tt.val)
+
+			cfg, err := LoadOAuth(oauth.New("client-id"), "")
+			if err == nil {
+				t.Fatalf("want a startup error, got config %+v", cfg)
+			}
+			if cfg != nil {
+				t.Errorf("no config may be returned alongside an error, got %+v", cfg)
+			}
+			if !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("error = %q, want it to contain %q", err, tt.wantErr)
+			}
+		})
+	}
+
+	t.Run("a config file the SDK cannot read fails the load", func(t *testing.T) {
+		// The demo loader treats a file with no longbridge: block as "no
+		// credentials in it" and carries on; the SDK's own reader is the one
+		// that rejects it, and that rejection has to reach the user.
+		sandbox(t)
+		t.Setenv("LONGBRIDGE_APP_KEY", "k")
+		writeFile(t, "config.yaml", "something_else:\n  key: value\n")
+
+		if _, err := LoadOAuth(oauth.New("client-id"), ""); err == nil {
+			t.Error("a config.yaml with no longbridge: block must fail the load, " +
+				"as it does for Load")
+		}
+	})
+
+	t.Run("a config file that is not YAML is rejected", func(t *testing.T) {
+		sandbox(t)
+		if _, err := LoadOAuth(oauth.New("client-id"), "config.toml"); err == nil {
+			t.Error("a config file that is not YAML must be rejected rather than " +
+				"silently ignored, as it is by Load")
+		}
+	})
+}
+
+func TestLoadOAuth_NeverTouchesTheNetworkOrAClient(t *testing.T) {
+	// Nothing here proves the absence of a call; it pins that LoadOAuth only
+	// builds an *sdk.Config and that it does not install an HTTP client or an
+	// OAuth client of its own — the caller owns both.
+	sandbox(t)
+	cfg, err := LoadOAuth(oauth.New("client-id"), "")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.SDK.Client != nil {
+		t.Error("LoadOAuth must not install an HTTP client; that is the caller's job")
+	}
+	if cfg.SDK.OAuthClient.ClientID() != "client-id" {
+		t.Errorf("the SDK config must carry the caller's OAuth client, got %q",
+			cfg.SDK.OAuthClient.ClientID())
 	}
 }

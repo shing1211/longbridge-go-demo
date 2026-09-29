@@ -52,7 +52,7 @@ func TestLoadFileInto_NoExplicitPathAndNoCandidates(t *testing.T) {
 	sandbox(t)
 	// The file is optional: its absence is not an error, and the caller must
 	// be told that no file was used.
-	got, err := loadFileInto(emptyVals(), "")
+	got, err := loadFileInto(emptyVals(), nil, "")
 	if err != nil {
 		t.Fatalf("absence is not an error, got %v", err)
 	}
@@ -65,7 +65,7 @@ func TestLoadFileInto_ExplicitPathThatDoesNotExistIsAnError(t *testing.T) {
 	// A typo in --config must not silently fall back to the environment, which
 	// would look like "my file is being ignored" or worse, "my file was used".
 	sandbox(t)
-	_, err := loadFileInto(emptyVals(), "no-such-file.yaml")
+	_, err := loadFileInto(emptyVals(), nil, "no-such-file.yaml")
 	if err == nil {
 		t.Fatal("want an error for a missing explicit path")
 	}
@@ -80,7 +80,7 @@ func TestLoadFileInto_ExplicitYamlFillsOnlyEmptyKeys(t *testing.T) {
 
 	t.Run("empty map is filled completely", func(t *testing.T) {
 		vals := emptyVals()
-		got, err := loadFileInto(vals, "cfg.yaml")
+		got, err := loadFileInto(vals, nil, "cfg.yaml")
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -95,7 +95,7 @@ func TestLoadFileInto_ExplicitYamlFillsOnlyEmptyKeys(t *testing.T) {
 
 	t.Run("a key already set by the environment is not overwritten", func(t *testing.T) {
 		vals := map[string]string{"app_key": "ENV_KEY", "access_token": "ENV_TOKEN"}
-		if _, err := loadFileInto(vals, "cfg.yaml"); err != nil {
+		if _, err := loadFileInto(vals, nil, "cfg.yaml"); err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
 		if vals["app_key"] != "ENV_KEY" {
@@ -111,7 +111,7 @@ func TestLoadFileInto_ExplicitYamlFillsOnlyEmptyKeys(t *testing.T) {
 
 	t.Run("a whitespace-only existing value counts as empty", func(t *testing.T) {
 		vals := map[string]string{"app_key": "  \t "}
-		if _, err := loadFileInto(vals, "cfg.yaml"); err != nil {
+		if _, err := loadFileInto(vals, nil, "cfg.yaml"); err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
 		if vals["app_key"] != "FILE_KEY" {
@@ -122,7 +122,7 @@ func TestLoadFileInto_ExplicitYamlFillsOnlyEmptyKeys(t *testing.T) {
 	t.Run("a whitespace-only file value is not stored", func(t *testing.T) {
 		writeFile(t, "blank.yaml", "longbridge:\n  app_key: \"  \"\n  app_secret: FILE_SECRET\n")
 		vals := emptyVals()
-		if _, err := loadFileInto(vals, "blank.yaml"); err != nil {
+		if _, err := loadFileInto(vals, nil, "blank.yaml"); err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
 		if _, ok := vals["app_key"]; ok {
@@ -138,7 +138,7 @@ func TestLoadFileInto_PartialFile(t *testing.T) {
 	sandbox(t)
 	writeFile(t, "partial.yaml", "longbridge:\n  app_key: ONLY_KEY\n")
 	vals := emptyVals()
-	if _, err := loadFileInto(vals, "partial.yaml"); err != nil {
+	if _, err := loadFileInto(vals, nil, "partial.yaml"); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if vals["app_key"] != "ONLY_KEY" {
@@ -161,7 +161,7 @@ func TestLoadFileInto_ExplicitNonYamlPathIsRejected(t *testing.T) {
 			sandbox(t)
 			writeFile(t, name, yamlCreds)
 
-			got, err := loadFileInto(emptyVals(), name)
+			got, err := loadFileInto(emptyVals(), nil, name)
 			if err == nil {
 				t.Fatalf("SAFETY: %q must be refused, but it was accepted and returned %q", name, got)
 			}
@@ -188,7 +188,7 @@ func TestLoadFileInto_ExplicitNonYamlPathIsRejected(t *testing.T) {
 // looking in the wrong place.
 func TestLoadFileInto_NonYamlIsCheckedBeforeTheFileExists(t *testing.T) {
 	sandbox(t)
-	got, err := loadFileInto(emptyVals(), "no-such-file.toml")
+	got, err := loadFileInto(emptyVals(), nil, "no-such-file.toml")
 	if err == nil {
 		t.Fatalf("want an error, got %q", got)
 	}
@@ -389,7 +389,7 @@ func TestLoadFileInto_CandidatePrecedence(t *testing.T) {
 				writeFile(t, names[j], "longbridge:\n  app_key: FROM_"+names[j]+"\n")
 			}
 			vals := emptyVals()
-			got, err := loadFileInto(vals, "")
+			got, err := loadFileInto(vals, nil, "")
 			if err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}
@@ -409,7 +409,7 @@ func TestLoadFileInto_MalformedYamlWithAnExplicitPathIsAnError(t *testing.T) {
 	writeFile(t, "broken.yaml", "longbridge:\n  app_key: [unclosed\n")
 
 	vals := emptyVals()
-	got, err := loadFileInto(vals, "broken.yaml")
+	got, err := loadFileInto(vals, nil, "broken.yaml")
 	if err == nil {
 		t.Fatal("want a parse error")
 	}
@@ -429,7 +429,7 @@ func TestLoadFileInto_MalformedYamlWithoutAnExplicitPathFallsThrough(t *testing.
 	writeFile(t, "config.local.yaml", yamlCreds)
 
 	vals := emptyVals()
-	got, err := loadFileInto(vals, "")
+	got, err := loadFileInto(vals, nil, "")
 	if err != nil {
 		t.Fatalf("a broken candidate must not be fatal, got %v", err)
 	}
@@ -444,7 +444,7 @@ func TestLoadFileInto_MalformedYamlWithoutAnExplicitPathFallsThrough(t *testing.
 func TestLoadFileInto_MalformedCandidateThenNoOthers(t *testing.T) {
 	sandbox(t)
 	writeFile(t, "config.yaml", "\tnot: [valid\n\t\t yaml: - -")
-	got, err := loadFileInto(emptyVals(), "")
+	got, err := loadFileInto(emptyVals(), nil, "")
 	if err != nil {
 		t.Fatalf("a broken candidate with no fallback must still be silent, got %v", err)
 	}
@@ -460,7 +460,7 @@ func TestLoadFileInto_UnknownExtensionIsNotSilentlyParsedAsYaml(t *testing.T) {
 	sandbox(t)
 	writeFile(t, "creds.conf", yamlCreds)
 
-	got, err := loadFileInto(emptyVals(), "creds.conf")
+	got, err := loadFileInto(emptyVals(), nil, "creds.conf")
 	if err == nil {
 		t.Fatalf("SAFETY: an unknown extension must be refused, but it returned %q", got)
 	}
@@ -474,7 +474,7 @@ func TestLoadFileInto_YamlWithoutALongbridgeBlock(t *testing.T) {
 	writeFile(t, "other.yaml", "something_else:\n  key: value\n")
 
 	vals := emptyVals()
-	got, err := loadFileInto(vals, "other.yaml")
+	got, err := loadFileInto(vals, nil, "other.yaml")
 	if err != nil {
 		t.Fatalf("a file with no longbridge block is not a parse error, got %v", err)
 	}
@@ -496,7 +496,7 @@ func TestLoadFileInto_EmptyAndNullLongbridgeBlock(t *testing.T) {
 			sandbox(t)
 			writeFile(t, "empty.yaml", tt.body)
 			vals := emptyVals()
-			if _, err := loadFileInto(vals, "empty.yaml"); err != nil {
+			if _, err := loadFileInto(vals, nil, "empty.yaml"); err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}
 			if len(vals) != 0 {
@@ -511,7 +511,7 @@ func TestLoadFileInto_ExtraKeysAreIgnored(t *testing.T) {
 	writeFile(t, "extra.yaml", "longbridge:\n  app_key: K\n  app_secret: S\n  access_token: T\n  http_url: https://example.invalid\n  region: cn\n")
 
 	vals := emptyVals()
-	if _, err := loadFileInto(vals, "extra.yaml"); err != nil {
+	if _, err := loadFileInto(vals, nil, "extra.yaml"); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	want := map[string]string{"app_key": "K", "app_secret": "S", "access_token": "T"}
@@ -528,7 +528,7 @@ func TestLoadFileInto_DirectoryAsTheExplicitPathIsAReadError(t *testing.T) {
 	if err := os.Mkdir("adir.yaml", 0o755); err != nil {
 		t.Fatalf("mkdir: %v", err)
 	}
-	got, err := loadFileInto(emptyVals(), "adir.yaml")
+	got, err := loadFileInto(emptyVals(), nil, "adir.yaml")
 	if err == nil {
 		t.Fatal("a directory is not a config file")
 	}

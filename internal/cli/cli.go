@@ -11,10 +11,13 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
 	"github.com/shopspring/decimal"
+
+	"github.com/longbridge/openapi-go/oauth"
 
 	appcfg "github.com/shing1211/longbridge-go-demo/internal/config"
 )
@@ -67,19 +70,20 @@ func Fail(err error) {
 //
 // # WHY A HELPER INSTEAD OF EIGHT COPIES
 //
-// The eight read-only binaries each inlined the same four lines, and the copies
-// had already drifted: cmd/quote said "the write gate is open" where the other
-// seven, and the contract in README.md, say "the order gate". Nothing noticed,
+// The eight read-only binaries that existed when this helper was written each
+// inlined the same four lines, and the copies had already drifted: cmd/quote
+// said "the write gate is open" where the other seven, and the contract in
+// README.md, say "the order gate". Nothing noticed,
 // because no test reached main() — with the inline copies put back and that
 // "write gate" wording restored, the whole suite still passed. The message now
 // exists once, so the noun cannot drift again, and
 // test/readonly_invariant_test.go fails if a read-only binary stops calling this
 // at all.
 //
-// WHY action STAYS A PARAMETER RATHER THAN BEING DERIVED FROM name: the eight
+// WHY action STAYS A PARAMETER RATHER THAN BEING DERIVED FROM name: the nine
 // action strings genuinely differ ("run the market reader" is not "quote a
 // symbol"), and GuardWrite prints the action verbatim in its own refusal text.
-// Deriving it from name would rewrite what eight binaries say when a real write
+// Deriving it from name would rewrite what nine binaries say when a real write
 // is refused, and that message belongs to GuardWrite, not to this helper.
 //
 // # WHY A VIOLATION EXITS 1 AND NOT 3
@@ -136,10 +140,26 @@ type Usage struct {
 	FS     *flag.FlagSet
 	Config string
 	Help   bool
+
+	// headers holds the raw -header arguments, in the order they were given.
+	// They are stored raw and validated inside appcfg.Load, so that the flag,
+	// the environment and the YAML file go through one parser and one set of
+	// rules — the reserved-name check above all.
+	headers []string
+	// headerErr is the first rejection among them. See Parse.
+	headerErr error
+
+	// logLevel is the SDK log level, empty when the flag was not passed.
+	logLevel string
 }
 
 // NewUsage creates a FlagSet named after the binary with a one-line summary
 // and a trailing credential block that lists every supported variable.
+//
+// The -header and -log-level flags are registered here rather than by each
+// command, for the same reason the credential block is: they are cross-cutting,
+// and a flag sixteen commands each had to remember to declare would be a flag
+// sixteen commands could each get subtly wrong.
 func NewUsage(name, summary string) *Usage {
 	fs := flag.NewFlagSet(name, flag.ContinueOnError)
 	fs.Usage = func() {
@@ -151,6 +171,13 @@ func NewUsage(name, summary string) *Usage {
 		for _, l := range appcfg.EnvDocLines() {
 			fmt.Fprintln(out, l)
 		}
+		fmt.Fprintf(out, "\nExtra headers (every request the SDK makes):\n")
+		fmt.Fprintf(out, "  -header NAME=VALUE             repeatable; also %s<NAME> or\n", appcfg.HeaderEnvPrefix)
+		fmt.Fprintf(out, "                              config.yaml `longbridge: headers:`, in that\n")
+		fmt.Fprintf(out, "                              order of precedence.\n")
+		fmt.Fprintf(out, "  Reserved, and refused: %s.\n", strings.Join(appcfg.ReservedHeaderNames(), ", "))
+		fmt.Fprintf(out, "  The SDK attaches those itself and applies extra headers\n")
+		fmt.Fprintf(out, "  afterwards, so one would silently REPLACE the credential.\n")
 		fmt.Fprintf(out, "\nSafety:\n")
 		fmt.Fprintf(out, "  LONGPORT_DRY_RUN            1/true (default) blocks all order writes.\n")
 		fmt.Fprintf(out, "  LONGPORT_MODE                simulated (default) or live.\n")
@@ -170,6 +197,25 @@ func NewUsage(name, summary string) *Usage {
 
 	u := &Usage{FS: fs}
 	fs.StringVar(&u.Config, "config", "", "path to a config.yaml holding credentials (default: auto-detect config.yaml)")
+	// WHY THIS RETURNS NIL INSTEAD OF ITS ERROR: the flag package wraps a Set
+	// error as `invalid value %q for flag -%s: %v`, which would print the whole
+	// argument — and the argument holds the value, which may be a credential.
+	// So the rejection is recorded here and reported by Parse with a message
+	// that names the header and quotes no value. The same masking rule the
+	// startup banner applies is applied to the error path here.
+	u.FS.Func("header", "extra HTTP header, NAME=VALUE; repeatable, and never one of the "+
+		"credential headers the SDK sets itself", func(spec string) error {
+		u.headers = append(u.headers, spec)
+		if u.headerErr != nil {
+			return nil
+		}
+		if _, err := appcfg.ParseHeaderSpec("-header", spec); err != nil {
+			u.headerErr = err
+		}
+		return nil
+	})
+	fs.StringVar(&u.logLevel, "log-level", "",
+		"route the SDK's own logging to stderr at debug|info|warn|error (default: none, so the SDK keeps its own logger)")
 	return u
 }
 
@@ -183,15 +229,56 @@ func (u *Usage) Parse(args []string) {
 		}
 		Fail(err)
 	}
+	// Reported here rather than from the flag's own Set, for the reason given
+	// where the flag is declared: no value, not even in an error message.
+	if u.headerErr != nil {
+		Fail(u.headerErr)
+	}
+	// The level is checked at parse time as well as inside appcfg.Load, so that
+	// a typo is a plain usage error — exit 1, naming the flag — even on a
+	// machine with no credentials, where Load would otherwise have reported the
+	// missing credential first.
+	if strings.TrimSpace(u.logLevel) != "" {
+		if _, err := appcfg.ParseLogLevel(u.logLevel); err != nil {
+			Fail(fmt.Errorf("-log-level: %w", err))
+		}
+	}
 }
 
 // Load validates configuration and renders the non-secret startup banner.
 func (u *Usage) Load() *appcfg.Config {
-	cfg, err := appcfg.Load(u.Config)
+	cfg, err := appcfg.Load(u.Config, u.loadOptions()...)
 	if err != nil {
 		Fail(err)
 	}
 	return cfg
+}
+
+// LoadOAuth is Load for the one command that authenticates with OAuth 2.0
+// rather than the app-key triple. It exists so that command's main() is shaped
+// like the other eight (`cfg := u.LoadOAuth(o)`) instead of repeating the
+// load-and-exit dance inline, which is exactly the kind of copy that drifts.
+//
+// The same Config comes back, so the command gets the same mode, dry-run state
+// and banner — and can assert the read-only invariant against a configuration
+// that was really loaded rather than one it assembled itself. The extra headers
+// and the SDK log level travel with it, because they are properties of the
+// configuration rather than of a particular credential.
+func (u *Usage) LoadOAuth(o *oauth.OAuth) *appcfg.Config {
+	cfg, err := appcfg.LoadOAuth(o, u.Config, u.loadOptions()...)
+	if err != nil {
+		Fail(err)
+	}
+	return cfg
+}
+
+// loadOptions is the one place the shared flags become loader options, so the two
+// loaders cannot drift into applying them differently.
+func (u *Usage) loadOptions() []appcfg.Option {
+	return []appcfg.Option{
+		appcfg.WithHeaders(u.headers...),
+		appcfg.WithLogLevel(u.logLevel),
+	}
 }
 
 // WithTimeout derives a request context bounded by the configured HTTP timeout.

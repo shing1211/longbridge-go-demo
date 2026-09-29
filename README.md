@@ -4,11 +4,11 @@ A small, complete, safety-gated demo of the **Longbridge (Longport) OpenAPI**
 using the official Go SDK, [`github.com/longbridge/openapi-go`](https://pkg.go.dev/github.com/longbridge/openapi-go)
 at **v0.25.2**.
 
-Fifteen commands, one shared config loader, and a hard rule that no order can be
+Sixteen commands, one shared config loader, and a hard rule that no order can be
 sent unless you say so three different ways.
 
-**SDK coverage: 176 of the 206 exported methods on every exported type the SDK
-exposes are exercised somewhere in `cmd/`; the other 30 are on an allow-list that
+**SDK coverage: 184 of the 206 exported methods on every exported type the SDK
+exposes are exercised somewhere in `cmd/`; the other 22 are on an allow-list that
 gives each one a written reason.** `make coverage-check` fails the build if that
 stops being true, in either direction. The normative statement is
 [`openspec/specs/sdk-coverage/`](openspec/specs/sdk-coverage/spec.md); see
@@ -134,8 +134,9 @@ are the only thing that differs.
 Two easy-to-confuse notes:
 
 - `LONGBRIDGE_ACCESS_TOKEN` is the **legacy Access Token** from User Center.
-  It is *not* an OAuth access token, and *not* a refresh token. This demo uses
-  legacy app-key auth, not OAuth.
+  It is *not* an OAuth access token, and *not* a refresh token. Every command
+  here uses legacy app-key auth; [`cmd/auth`](#auth--oauth-20-browser-login-read-only)
+  runs the OAuth flow but does not switch the other fifteen onto it.
 - Anyone who obtains the Access Token can trade your account through the API.
   Treat it like a password.
 
@@ -261,7 +262,7 @@ doc comment on `GuardWrite` says not to "simplify" it back.
 The same evidence is visible at runtime: with the *live* gate deliberately
 satisfied on a read-only binary, the banner shows the state that tripped the
 assertion before the refusal is printed — see
-[the read-only invariant](#the-read-only-invariant-eight-binaries-assert-it).
+[the read-only invariant](#the-read-only-invariant-nine-binaries-assert-it).
 
 ---
 
@@ -493,15 +494,15 @@ Note that `executions -action withdraw` is an **order** write (`WithdrawOrder`
 is an alias of `CancelOrder` in the SDK), so it uses the order gate and
 `--confirm-live` — not the watchlist gate.
 
-### The read-only invariant: eight binaries assert it
+### The read-only invariant: nine binaries assert it
 
-Separately from the six write gates, **eight** of the fifteen binaries assert
+Separately from the six write gates, **nine** of the sixteen binaries assert
 the **order** gate is still closed at startup. If the order gate is open they
 refuse to run at all, rather than proceeding in a misconfigured environment:
 
 | | |
 | --- | --- |
-| Binaries | `quote`, `watch`, `warrant`, `reference`, `portfolio`, `fundamentals`, `market`, `screener` |
+| Binaries | `quote`, `watch`, `warrant`, `reference`, `portfolio`, `fundamentals`, `market`, `screener`, `auth` |
 | Check | `cli.AssertReadOnly(cfg, "<name>", "run the …")` |
 | Exit | **1**, `internal invariant violated: <name> is read-only but the order gate is open` |
 
@@ -515,7 +516,8 @@ exit=1
 ```
 
 The one-line `cli.AssertReadOnly` call is a real change, not a reformat. The eight
-binaries used to inline the same four lines, and the copies had already drifted:
+binaries that existed when the helper was written used to inline the same four
+lines, and the copies had already drifted:
 `cmd/quote` said *"the **write** gate is open"* where the other seven and this
 document said *"the **order** gate"*. The message now exists once, in
 `internal/cli`, so the noun cannot drift again — and the mutation that put the
@@ -540,26 +542,27 @@ The other seven binaries that gate writes but do **not** carry the assertion are
 `trade`, `executions`, `watchlist`, `sharelist`, `content`, `dca` and `alert` —
 correctly, because for them an open order gate is a legitimate state.
 
-**This assertion is test-covered, in all eight, and it was not for a long time.**
+**This assertion is test-covered, in all nine, and it was not for a long time.**
 It used to be untested: it lives in `main()`, and `main()` is not reachable from a
-test, so deleting any one of the eight checks left the suite green. Two things
-closed that gap, and both are worth naming because neither is a normal test:
+test, so deleting any one of the eight checks then in existence left the suite
+green. Two things closed that gap, and both are worth naming because neither is a
+normal test:
 
-- **`test/readonly_invariant_test.go` parses the source.** For each of the eight
+- **`test/readonly_invariant_test.go` parses the source.** For each of the nine
   it asserts that `main()` calls `cli.AssertReadOnly` **exactly once**, as a
   **top-level statement** (not hidden inside the `cli.Run` closure), on the
   config it just loaded (`cfg`), with the binary's own name and the action string
   that `GuardWrite` would have printed — and that a `// SAFETY` comment sits
   directly above it, after the `[config]` banner and before the first `cli.Run`.
-  Two further tests in the same file make the lists self-policing: a ninth
+  Two further tests in the same file make the lists self-policing: a tenth
   `cmd/` directory that is in neither the read-only nor the writing list fails,
   and a binary that *can* write fails if it carries `AssertReadOnly` at all.
 - **`internal/cli` drives the helper itself.** `TestAssertReadOnly_ClosedGateReturnsNil`
-  runs all eight binaries against all three closed-gate configurations;
+  runs all nine binaries against all three closed-gate configurations;
   `TestAssertReadOnly_OpenGateIsTheOnlyCellGuardWriteAdmits` pins the premise
   that live-with-dry-run-off is the single admitting cell; and
   `TestAssertReadOnly_OpenGateExitsOneMisconfiguration` re-runs the test binary
-  as a subprocess for all eight, pinning **exit 1** and the stderr line *byte for
+  as a subprocess for all nine, pinning **exit 1** and the stderr line *byte for
   byte*. That last one is what now fails if the message drifts back to "write
   gate".
 
@@ -662,7 +665,7 @@ safe at the boundary: a width of 0 or less returns an ellipsis rather than
 slicing at `-1`. The input was unreachable from the CLI, and the test that used
 to document the panic has been inverted to assert the new behaviour. This
 mirrors `cli.Truncate` in `internal/cli`, which guards the same boundary for the
-other fourteen binaries.
+other fifteen binaries.
 
 ### `watch` — realtime stream (read-only)
 
@@ -700,7 +703,7 @@ per-topic subscribe failures explicitly, because a partial subscribe still
 "successfully" returns and silently streaming nothing is the confusing outcome.
 
 **It also carries the read-only invariant assertion** described under
-[the read-only invariant](#the-read-only-invariant-eight-binaries-assert-it):
+[the read-only invariant](#the-read-only-invariant-nine-binaries-assert-it):
 if the order gate is open, the binary refuses to start. That claim was verified
 rather than assumed. The complete SDK surface this file touches is `Subscribe`,
 `Unsubscribe`, `Subscriptions` and the `On*` push callbacks — it never touches
@@ -1375,7 +1378,7 @@ This binary additionally asserts the order gate is still **closed** at startup,
 exactly like the other readers: if you somehow run it with `LONGPORT_DRY_RUN=0`
 and `LONGPORT_MODE=live`, it refuses to run at all rather than proceeding in a
 misconfigured environment. See
-[the read-only invariant](#the-read-only-invariant-eight-binaries-assert-it).
+[the read-only invariant](#the-read-only-invariant-nine-binaries-assert-it).
 
 ### Five validation fixes in this command
 
@@ -1745,9 +1748,9 @@ and returns matching securities. It is the same shape as `TopMovers` in
 server-side changes. As in `cmd/market`, `cmd/fundamentals` and `cmd/warrant`,
 the startup banner asserts the **order** gate is still closed, so running the
 screener with dry run off and mode live refuses to start rather than
-proceeding in a misconfigured environment. Eight binaries carry that assertion
+proceeding in a misconfigured environment. Nine binaries carry that assertion
 in total; see
-[the read-only invariant](#the-read-only-invariant-eight-binaries-assert-it).
+[the read-only invariant](#the-read-only-invariant-nine-binaries-assert-it).
 
 ```bash
 go run ./cmd/screener -action indicators                    # the indicator catalogue
@@ -1804,6 +1807,79 @@ what to do instead: omit the flag to search with `-condition`, or pass a real id
 from `-action recommend`. The same applies to a negative id. Detecting this
 needs `fs.Visit`, because a plain `int64` default of `0` cannot tell an omitted
 flag from an explicit `0`.
+
+### `auth` — OAuth 2.0 browser login (read-only)
+
+Runs the Longbridge OAuth 2.0 authorization-code flow: bind a local callback
+port, print the authorization URL, open it if a browser can be launched, wait for
+the redirect, exchange the code, and report what came back. It is the only
+command here that **authenticates** rather than reads, and it is what closes the
+`OAuth` gap in the SDK-coverage table: all five `OAuth` methods are referenced
+from here.
+
+**It is read-only, and the one write it does is not an API write.** No request
+reaches Longbridge at all — it authenticates and then reports. The SDK files the
+token at `$HOME/.longbridge/openapi/tokens/<client id>` with mode 0600, which is
+a local file outside this repository, created by the SDK, and the only side
+effect of a run. The order gate is still asserted at startup, because there is
+still no write the gate could legitimately permit.
+
+```bash
+go run ./cmd/auth                                     # browser flow
+go run ./cmd/auth -no-browser                         # headless / over SSH
+go run ./cmd/auth -port 70000                         # a different callback port
+go run ./cmd/auth -env staging                        # authorize against *.xyz
+go run ./cmd/auth -client-id "$OAUTH_CLIENT_ID"       # skip the environment
+```
+
+| Flag | Default | Notes |
+| --- | --- | --- |
+| `-client-id` | `$LONGBRIDGE_CLIENT_ID` | Falls back to `$LONGBRIDGE_APP_KEY` / `$LONGPORT_APP_KEY`, **labelled as an assumption**. |
+| `-port` | `60355` | Local callback port, 1-65535. Rejected outside that range. |
+| `-no-browser` | `false` | Print the URL and wait instead of launching anything. **This is the headless/SSH path.** |
+| `-env` | — | `staging` only. Anything else is a usage error, not a silent no-op. |
+| `-config` | auto-detect | As everywhere else; only the SDK's passthrough tunables come from it. |
+
+**The client-ID fallback is an assumption, and is labelled as one everywhere.**
+The OAuth client ID is issued from the same User Center page as the app key, so
+when `$LONGBRIDGE_CLIENT_ID` is unset the app key is used. Nothing in the SDK
+documents the two as the same string, and this project has never authorized
+against a live account, so the fallback is reported as `ASSUMED` in the output
+and a rejected authorization with an app key set is the symptom that would
+disprove it.
+
+**`-no-browser` is the flag that matters over SSH.** The URL is printed first and
+the command waits, so the browser can be on another machine — but the redirect
+has to come back to the host running the command, which is what the `ssh -L`
+line in `-h` is for. A missing browser is never fatal: the URL is printed before
+any launcher is tried, because on a headless Linux box `xdg-open` is often
+installed, exits zero and opens nothing.
+
+**`-env staging` has to be set before `oauth.New` runs.** The SDK reads
+`LONGBRIDGE_ENV` once, at construction, to choose between
+`openapi.longbridge.com` and `openapi.longbridge.xyz`; setting it afterwards
+cannot move a client that already exists. The command applies the flag before
+that call for exactly this reason.
+
+**What the report says, and how much of it is a fact.** "A usable token exists"
+is proved by `AccessToken` — the call the SDK's own HTTP client makes before
+every request, which refreshes a token that is expired or within an hour of
+expiry. "Where it is, and until when" is read out of the SDK's cache file,
+because the token type is unexported and `OAuth` exposes no accessor for the
+expiry. **"Reused or freshly authorized" is an inference**: `Build` does not
+report which of its three paths it took, so the command reports the browser case
+as a fact (the SDK asked for a URL, which it only does with no usable cached
+token) and the other two from a byte-for-byte comparison of the cache file
+across the call, labelled as inferred. The token itself is never printed, not
+even a prefix or a length, and the client ID is masked — which also masks the
+file name, because the file name *is* the client ID.
+
+**This has never been run against a working account.** The flow was written from
+the SDK's source. The one path a test can drive offline is the cached-token one,
+and that is the path `cmd/auth/main_test.go` exercises end to end — a seeded
+cache, no browser, no network, with the report asserted on. The browser flow and
+the silent refresh are not exercised by a test, because both need a token
+endpoint to talk to.
 
 ### Every response is `json.RawMessage`, and the renderer is a pretty-printer
 
@@ -1936,7 +2012,8 @@ reported as a wrong format even when the file does not exist.
 | `LONGPORT_ENABLE_OVERNIGHT` | `false` | 24h US overnight trading. |
 | `LONGBRIDGE_HTTP_TIMEOUT` | `15s` | Demo default. |
 | `LONGBRIDGE_TIMEOUT` / `LONGBRIDGE_AUTH_TIMEOUT` | SDK default | Per-request timeouts. |
-| `LONGBRIDGE_LOG_LEVEL` | unset | `trace debug info warn error`. |
+| `LONGBRIDGE_LOG_LEVEL` | unset | `trace debug info warn error`. See [SDK logging](#extra-request-headers-and-sdk-logging). |
+| `LONGPORT_HEADER_<NAME>` | unset | An extra HTTP header sent with every request. See [extra request headers](#extra-request-headers-and-sdk-logging). |
 | `LONGBRIDGE_READ_QUEUE_SIZE` / `WRITE_QUEUE_SIZE` / `READ_BUFFER_SIZE` / `MIN_GZIP_SIZE` | SDK default | Protocol tuning. |
 
 ### Demo-only safety variables
@@ -1958,6 +2035,117 @@ normative conditions are in
 [`openspec/specs/write-gates/`](openspec/specs/write-gates/spec.md); the
 discoverability check is the `-h` transcript under
 [the six safety gates](#the-six-safety-gates).
+
+### Extra request headers and SDK logging
+
+Two flags belong to every command rather than to any one of them, so they are
+declared once on the shared flag set and every binary inherits them. They are
+also properties of the configuration, which is why `config.Load` applies them:
+a per-command call would be sixteen chances to forget one, and sixteen chances
+to get the security rule below wrong.
+
+**Extra request headers.** `-header NAME=VALUE` is repeatable, and everything
+after the first `=` is the value — so a signature, a base64 blob or a query
+string survives intact.
+
+```bash
+go run ./cmd/quote -header 'x-trace-id=abc123' -header 'x-tenant=demo'
+```
+
+| Precedence | Source | Notes |
+| --- | --- | --- |
+| Highest | `-header NAME=VALUE` | Repeatable. Split on the first `=`; the name is trimmed, the value is not. |
+| Middle | `LONGPORT_HEADER_X_TRACE_ID=abc123` | Any variable with that prefix. Each `_` after the prefix is read as `-`, and the name is lower-cased. |
+| Lowest | `config.yaml` → `longbridge: headers:` | A mapping of header names to values. |
+
+Precedence is the credential rule extended by one step: **environment beats file,
+and the flag beats both** — so the same key set from more than one place keeps
+the highest one. Within a single source, the last entry wins
+(`-header x-a=1 -header x-a=2` sends `2`). Names that differ only in case are one
+header, folded to lower case before they are handed over, because the SDK stores
+them in a map and iterates it: two spellings would otherwise be a race with no
+tie-break.
+
+The environment and the file matter for the ordinary reason a command line does
+not: a secret passed with `-header` lands in your shell history and in `ps`, and
+`.env` is already gitignored.
+
+**The credential headers are refused, not merged.** `x-api-key`,
+`authorization`, `x-api-signature` and `x-timestamp` cannot be set through any of
+the three sources. This is the whole reason the flag is worth having carefully:
+the SDK attaches its own credential headers and then applies extra headers
+*afterwards* with `Set`, so a header of the same name would **silently replace
+the credential** — no error, and no way to tell from the response which account
+was addressed. `x-timestamp` is reserved for the same reason with a milder
+consequence: the SDK only fills it in when it is empty, and signs the request
+including it, so a supplied one produces a signature that is rejected rather
+than a wrong signature. A refusal names the header, exits **1**, and prints
+neither the value nor the argument.
+
+**What is masked, precisely.** Every command prints its configuration as one
+`[config]` line on stderr before it does anything, and the headers are on it:
+
+```console
+[config] mode=simulated  (expected: credentials from a SIMULATED account) dry_run=true app_key=dumm******78 http=https://openapi.longbridge.com (SDK default) quote_ws=wss://openapi-quote.longbridge.com/v2 (SDK default) trade_ws=wss://openapi-trade.longbridge.com/v2 (SDK default) header[x-access-token]=ghp_******op(from -header) header[x-trace-id]=abc123(from -header) sdk_log=debug
+```
+
+**That line is the renderer exercised offline, not a live transcript.** It was
+produced by loading a configuration with deliberately fake credentials and
+dummy header values and printing the result, with no client, no connection and
+no request; nothing in it has been compared against what Longbridge received,
+and this project has never held a working access token. See
+[Honest status](#honest-status).
+
+The decision is a pure function of the header **name**, and the name is printed
+next to the result, so you can tell from the banner alone which values were
+shortened:
+
+| Header name contains (case-insensitively) | What is printed |
+| --- | --- |
+| `token`, `secret`, `key`, `auth`, `pass`, `credential`, `cookie` | The value through the same fixed-width mask the app key uses: at most four leading characters, six `*`, at most two trailing. Never the whole value. Empty renders as `<unset>`. |
+| anything else | The value, in full. |
+
+Matching is on substrings, so `x-passenger` (contains `pass`), `x-keynote`
+(`key`) and `x-author` (`auth`) are masked too. That is deliberate: the cost is a
+masked line in a banner, and the alternative is a printed credential when
+somebody names a header in a way nobody predicted. The same rule applies to the
+error messages — a rejected `-header` never quotes the value.
+
+The flip side is worth stating plainly: **a header whose name contains none of
+those fragments is printed in full**, including a value that happens to be a
+credential (`x-bearer: …`). That is why the environment and file sources exist —
+if a value is secret and hard to name, put it in `.env`, not on a command line.
+
+**SDK logging.** `-log-level debug|info|warn|error` routes everything the SDK
+logs to **stderr**, never stdout, because stdout is data in this repo and a
+library writing into it would corrupt a pipe. The levels are the SDK's own: the
+library's logger implements `info`, `debug`, `warn` and `error`, and nothing
+else — so `-log-level trace` is **refused** with a message naming the four, even
+though the tuning table above lists `trace` for `LONGBRIDGE_LOG_LEVEL`; the
+library accepts that name and ignores it, which is how a switch can be set and
+do nothing. An unusable value exits **1** naming the flag.
+
+```bash
+go run ./cmd/quote -log-level debug    # stderr only; the banner gains "sdk_log=debug"
+```
+
+Leaving the flag off changes nothing: the SDK keeps the logger it installs for
+itself, which writes to stderr through the standard library `log` package. Note
+what "no level set" means there, because it is not "quiet": the library's own
+logger filters with `severity >= threshold`, its threshold starts at zero, and
+zero is *below* `info` — so with nothing set it prints `error`, `warn` and
+`info` and only `debug` is suppressed (measured, with fake credentials and no
+request). A `-log-level` of `warn` or `error` is therefore quieter than passing
+no flag at all, which is the point of it. `-log-level` beats
+`LONGBRIDGE_LOG_LEVEL`, since a value typed on the command line should not be
+undone by a variable left in `.env` from another session.
+
+One thing to know before wiring anything else to that logger: installing it is
+**process-wide**, not per-configuration. The SDK's own setter also replaces the
+library's package-level default logger, so every part of the SDK in the process —
+including the websocket read loops — logs through it. This repo builds one
+configuration per run, so nothing else is affected, which is why the call lives
+in one place behind one flag rather than being available to every command.
 
 ### Exit codes
 
@@ -2044,7 +2232,7 @@ Two things keep landing on the wrong code, so both are now stated as rules:
 - **A read-only binary with the order gate open is 1, not 3.** Exit 3 is
   reserved for a *guard refusing a write*; a reader that refuses to start is not
   that. See
-  [the read-only invariant](#the-read-only-invariant-eight-binaries-assert-it)
+  [the read-only invariant](#the-read-only-invariant-nine-binaries-assert-it)
   and [`openspec/specs/read-only-invariant/`](openspec/specs/read-only-invariant/spec.md).
 
 ### Secret handling
@@ -2069,12 +2257,23 @@ candidates, so a stale `config.yml` or `config.toml` left in the tree cannot sit
 there looking supported — and if you pass one explicitly you now get a clear
 error rather than a confusing SDK one.
 
+**Header values are a fourth place a value can leak, and it has its own rule.**
+An extra request header is applied to every request, and its value can be a
+credential, so it is masked or not by the same name-based rule described under
+[extra request headers](#extra-request-headers-and-sdk-logging): a header whose
+name contains `token`, `secret`, `key`, `auth`, `pass`, `credential` or `cookie`
+is shown through the same fixed-width mask as the app key and never in full, and
+a header with none of those is shown in full. The rule is on the name, is applied
+to the banner and to every rejection message alike, and never prints a value —
+which is also why `-header` refuses to echo its own argument when it reports a
+problem, even though the flag layer would have done exactly that.
+
 ---
 
 ## SDK coverage
 
 **The check now scans the whole exported surface: 206 exported methods on all
-exported types, of which 176 are referenced from `cmd/` and 30 are
+exported types, of which 184 are referenced from `cmd/` and 22 are
 allow-listed with a written reason. There are no unreferenced-and-unjustified
 methods.** The previous claim — 153 of 153 context methods — was true of the
 context types and silently narrower than the surface it was standing in for. The
@@ -2090,11 +2289,11 @@ quoted verbatim:
 
 ```console
 $ make coverage-check
-sdk coverage: 176/206 exported methods referenced from cmd/
-sdk allow-list: 30 of 206 methods justified, by reason:
-  internal     21
+sdk coverage: 184/206 exported methods referenced from cmd/
+sdk allow-list: 25 of 206 methods justified, by reason:
+  internal     20
   unimportable 1
-  not-used     8
+  not-used     4
 ```
 
 You can also check it yourself without trusting either. **One pattern covers the
@@ -2252,7 +2451,7 @@ counts.
 
 ### The allow-list, and its three reason words
 
-Thirty methods are referenced from nowhere in `cmd/`, and each carries one line
+Twenty-five methods are referenced from nowhere in `cmd/`, and each carries one line
 `Type Method:reason` in the Makefile. The check is an **exact set** assertion,
 which is why it is worth saying what that means — it fails in **both**
 directions:
@@ -2272,14 +2471,18 @@ The three reason words, as the Makefile defines them:
   we do make. Every context method routes through `http.Client.Call`; the
   eleven `Values()` are called by the context method that accepts them;
   `Config.Logger` by the two websocket contexts; the three `GetConfig` by
-  `config.New`. Reached, just not by us. **21** entries.
+  `config.New`. Reached, just not by us. **20** entries.
 - **`unimportable`** — it lives in the SDK's `internal/` tree. Go's internal
   rule means this module cannot import it at all, so a call site is
   unsatisfiable by construction rather than by choice. It has its own word so
   nobody "fixes" it by trying. **1** entry (`Signer Sign`).
 - **`not-used`** — importable and user-facing, deliberately not reached. Kept
-  distinct from `internal` on purpose: collapsing the two would lose the fact
-  that a user *could* call it. **8** entries.
+  distinct from `internal` on purpose: collapsing them would lose the fact
+  that a user *could* call it. **4** entries: `Client.GetOTP`, the two `Config`
+  setters (`SetLogger`, `WithHeader`) and `TradeStatus.UnmarshalJSON`. The five
+  `OAuth` methods were the largest block on this list until `cmd/auth` was
+  written; they left it because the check said so, not because this paragraph
+  was edited first.
 
 Per type, the numbers behind the three-line summary:
 
@@ -2294,24 +2497,24 @@ Per type, the numbers behind the three-line summary:
 | `SharelistContext` | 8 | 8 | 0 |
 | `Client` | 7 | 1 | 6 |
 | `ContentContext` | 7 | 7 | 0 |
-| `OAuth` | 5 | 0 | 5 |
+| `OAuth` | 5 | 5 | 0 |
 | `ScreenerContext` | 5 | 5 | 0 |
 | `PortfolioContext` | 5 | 5 | 0 |
 | `AlertContext` | 4 | 4 | 0 |
-| `Config` | 3 | 0 | 3 |
+| `Config` | 3 | 3 | 0 |
 | `Signer` | 2 | 1 | 1 |
 | `AssetContext` | 2 | 2 | 0 |
 | `CalendarContext`, `DCAStatus`, `DCAFrequency`, `PinnedMode`, `CalendarCategory`, `ApiError` | 1 each | 1 each | 0 |
 | `EnvConfig`, `TOMLConfig`, `YAMLConfig` (the `GetConfig` methods) | 3 | 0 | 3 |
 | the eleven `Get*` request types (`Values`) | 11 | 0 | 11 |
-| **Total** | **206** | **176** | **30** |
+| **Total** | **206** | **184** | **22** |
 
 The per-context picture — **which command file each group lives in**, which is
 the part the spec cannot hold for you:
 
 | Area | Context type | Methods | Covered | Lives in |
 | --- | --- | --- | --- | --- |
-| Trade status | `TradeStatus` (predicates and helpers) | 17 | 16 | `cmd/market`, in the `status` section's `Predicates` block. `UnmarshalJSON` is allow-listed `not-used`. |
+| Trade status | `TradeStatus` (predicates and helpers) | 17 | 16 | `cmd/market`, in the `status` section's `Predicates` block, and in `cmd/market/main_test.go` for the decode tests. `UnmarshalJSON` is allow-listed `not-used` and stays there: `encoding/json` calls it implicitly, so no call site naming the method exists for the scan to find. |
 | Market data | `QuoteContext` | 47 | 47 | `cmd/quote`, `cmd/watch`, `cmd/market` (2 sections), `cmd/executions`, `cmd/reference`, `cmd/warrant`, `cmd/watchlist -action list`. |
 | Fundamentals | `FundamentalContext` | 32 | 32 | `cmd/fundamentals`, one `-action` per method. |
 | Orders & account | `TradeContext` | 19 | 19 | `cmd/trade`, plus `cmd/executions` and `cmd/watch -orders`. |
@@ -2325,7 +2528,7 @@ the part the spec cannot hold for you:
 | Assets | `AssetContext` | 2 | 2 | `cmd/fundamentals`. |
 | Calendar | `CalendarContext` | 1 | 1 | `cmd/fundamentals`. `cmd/market` also has `TradingDays` from `QuoteContext`. |
 | **Context subtotal** | **12 context types** | **153** | **153** | |
-| Everything else | the 25 non-context exported types | 53 | 23 | Spread across `cmd/market`, `cmd/dca`, `cmd/fundamentals`, `cmd/content`, and the SDK's own internals; 30 allow-listed. |
+| Everything else | the 25 non-context exported types | 53 | 31 | Spread across `cmd/market`, `cmd/auth`, `cmd/dca`, `cmd/fundamentals`, `cmd/content`, and `internal/config`, which is where the extra-header and SDK-logger calls live; 22 allow-listed. |
 
 There is no longer any context-method omission to explain, so the rule that used
 to govern them — "this demo only calls a mutating method when that method sits
@@ -2390,9 +2593,15 @@ What *was* verified by execution:
   tried — the 18 of the earlier rounds and the 4 added with the `cmd/watchlist`
   dispatcher — turn the suite red with the specific test that was written for
   them.
-- All **fifteen** binaries build; `-h` exits 0 with no credentials.
-- All fifteen exit **2** with a readable missing-credentials message listing all
-  three variables, and no panic.
+- All **sixteen** binaries build; `-h` exits 0 with no credentials. (`cmd/auth`
+  was re-checked when it was added: `make build` builds it, and `./bin/auth -h`
+  exits 0 in an empty environment.)
+- All of them but `cmd/auth` exit **2** with a readable missing-credentials
+  message listing all three variables, and no panic. **`cmd/auth` exits 1 with a
+  different message, and that is deliberate:** it needs no app-key triple at all,
+  so with nothing configured it reports the missing OAuth client ID and the three
+  ways to supply it. Reporting the triple instead would be a lie — that is the
+  credential it does not use.
 - A bad flag exits **1**, not 2, in every form that reaches the flag layer:
   `./bin/quote -nope` → 1, `./bin/quote -count abc` → 1 and
   `./bin/market -sections nonsense` → 1, all with the three credentials unset,
@@ -2434,7 +2643,7 @@ What *was* verified by execution:
   environment has already supplied all three credentials.
 - The static coverage check above now scans the **whole** exported surface, not
   just the context types: **206** exported methods on every exported type,
-  **176** referenced from `cmd/`, **30** allow-listed with a reason, and none
+  **184** referenced from `cmd/`, **22** allow-listed with a reason, and none
   left in the gap between the two. Getting there meant fixing the pattern twice
   over — the old snippets used `\(c \*` and silently skipped all 12
   `MarketContext` methods, and the next version's `\*` would have silently
@@ -2445,7 +2654,13 @@ What *was* verified by execution:
   the question each answers (`session`, `us hours`, `closed`, `other`), with a
   per-market `status` block and a separate `delay status` block. Sixteen of the
   seventeen `TradeStatus` methods are now referenced; `UnmarshalJSON` is
-  allow-listed `not-used`. This is verified **entirely offline** — the
+  allow-listed `not-used` and stays there, because `encoding/json` invokes it
+  implicitly for a `market.TradeStatus` field, so no call site naming the method
+  exists for the scan to find. What the decode tests in `cmd/market` add is
+  **offline** coverage of that implicit path: numeric codes through
+  `json.Unmarshal`, the boundaries of the code table, an unknown code collapsing
+  to the documented sentinel, and the marshal round trip. Nothing about a market
+  is involved. This is verified **entirely offline** — the
   predicates are pure functions of a status value, so the tests build statuses
   by hand and assert each predicate for every state the SDK can produce, with no
   client, no fixtures and no network. It has **not** been compared against what
@@ -2636,11 +2851,11 @@ The `Makefile` has grown three targets since this section was last written, and
 | Target | What it does |
 | --- | --- |
 | `make test` | `go test -race ./...` |
-| `make coverage-check` | Re-derives the list of every exported method on every exported type from the module cache, and **fails** if one is neither referenced from `cmd/` nor allow-listed with a reason — in either direction. Prints `sdk coverage: 176/206 exported methods referenced from cmd/` plus the per-reason allow-list breakdown. |
+| `make coverage-check` | Re-derives the list of every exported method on every exported type from the module cache, and **fails** if one is neither referenced from `cmd/` nor allow-listed with a reason — in either direction. Prints `sdk coverage: 184/206 exported methods referenced from cmd/` plus the per-reason allow-list breakdown. |
 | `make verify` | `fmt-check vet test build coverage-check` — the whole CI set. |
 
 The rest of the targets are unchanged: `all` (`fmt vet build`), `build`, `fmt`,
-`fmt-check`, `vet`, `tidy`, `clean`, `help` and fifteen `run-*`. Run
+`fmt-check`, `vet`, `tidy`, `clean`, `help` and sixteen `run-*`. Run
 `make help` for the annotated list.
 
 ```console
@@ -2648,29 +2863,30 @@ $ make verify
 gofmt clean
 go vet ./...
 go test -race ./...
-ok  	github.com/shing1211/longbridge-go-demo/internal/config	0.226s
-ok  	github.com/shing1211/longbridge-go-demo/test	0.087s
+ok  	github.com/shing1211/longbridge-go-demo/internal/config	0.273s
+ok  	github.com/shing1211/longbridge-go-demo/test	0.051s
   build quote
   …
-  build screener
-sdk coverage: 176/206 exported methods referenced from cmd/
-sdk allow-list: 30 of 206 methods justified, by reason:
-  internal     21
+  build auth
+sdk coverage: 184/206 exported methods referenced from cmd/
+sdk allow-list: 25 of 206 methods justified, by reason:
+  internal     20
   unimportable 1
-  not-used     8
+  not-used     4
 ```
 
 ### The numbers
 
 | Package | Test functions | Cases executed | Statement coverage |
 | --- | --- | --- | --- |
-| `internal/config` | 81 | 466 | **100.0%** |
+| `internal/config` | 88 | 482 | **100.0%** |
 | `cmd/fundamentals` | 62 | 414 | 19.8% |
-| `internal/cli` | 43 | 160 (159 pass + 1 skip) | **98.7%** |
+| `cmd/market` | 46 | 225 | 25.1% |
+| `internal/cli` | 46 | 167 (166 pass + 1 skip) | **98.8%** |
 | `cmd/warrant` | 36 | 254 | 55.9% |
 | `cmd/dca` | 35 | 174 | 48.8% |
-| `cmd/market` | 40 | 192 | 25.1% |
 | `cmd/sharelist` | 27 | 120 | 36.1% |
+| `cmd/auth` | 27 | 53 | **83.6%** |
 | `cmd/alert` | 25 | 121 | 44.2% |
 | `cmd/trade` | 23 | 129 | 35.7% |
 | `cmd/screener` | 20 | 135 | 41.6% |
@@ -2679,8 +2895,8 @@ sdk allow-list: 30 of 206 methods justified, by reason:
 | `cmd/executions` | 16 | 115 | 17.2% |
 | `cmd/reference` | 16 | 100 | 8.6% |
 | `cmd/quote` | 8 | 60 | 12.0% |
-| `test` | 3 | 18 | *no statements* |
-| **Total** | **469** | **2 651** (2 650 pass + 1 skip) | — |
+| `test` | 3 | 19 | *no statements* |
+| **Total** | **512** | **2 761** (2 760 pass + 1 skip) | — |
 
 Sorted by test functions. `cmd/portfolio` and `cmd/watch` have no test file and
 so appear in no row; `go test -cover ./...` reports them at 0.0%. The `test`
@@ -2693,32 +2909,37 @@ meaningful when re-executed by its parent. To reproduce the totals:
 
 ```console
 $ go test -count=1 -v ./... 2>&1 | grep -cE '^\s*--- PASS'
-2650
+2760
 $ go test -count=1 -v ./... 2>&1 | grep -cE '^\s*--- SKIP'
 1
 $ grep -rhE '^func Test' --include='*_test.go' . | wc -l
-469
+512
 $ go test -cover ./... | wc -l
-18
+19
 $ make build && ls bin | wc -l
-15
+16
 ```
 
-`internal/config` is at **100.0% of statements**. `internal/cli` is at **98.7%**,
-and the single uncovered statement is `internal/cli/cli.go:194` — the `return
-cfg` on `Usage.Load`'s **credentialed success path**. It is unreachable from a
-test that has no real credentials, because the only way past the `Load` error
-branch is a successful `appcfg.Load`. The failure path on the line above
-(`Fail(err)`) *is* covered.
+`internal/config` is at **100.0% of statements**. `internal/cli` is at **98.8%**,
+and the single uncovered statement is `Usage.Load`'s `Fail(err)` — the exit on a
+credentialed load failure, which cannot be reached in-process because `Fail`
+exits. `Usage.LoadOAuth`, the second loader `cmd/auth` uses, is fully covered:
+its own failure path is driven through the re-exec harness in `fail_test.go`
+(exit 1 for a bad `LONGPORT_MODE`, which is a usage error and not the
+missing-credentials exit 2), and its success path in `cli_test.go`.
 
 ### The `cmd/*` coverage numbers mean less than they look
 
 **Read the per-package percentages in that table as "how much of the flag and
 parse layer is tested", not as "how much of the binary is tested".** The range
 is wide and the low end is low: 8.6% for `cmd/reference`, 12.0% for
-`cmd/quote`, 17.2% for `cmd/executions`, 19.8% for `cmd/fundamentals`, 21.1%
-for `cmd/market`. The 55.9% at the top of the range (`cmd/warrant`) is the
-most-covered package, not a typical one.
+`cmd/quote`, 17.2% for `cmd/executions`, 19.8% for `cmd/fundamentals`, 25.1%
+for `cmd/market`. The two at the top of the range are not typical, and both are
+top of it for a reason rather than by accident: `cmd/warrant` at 55.9% and
+`cmd/auth` at 83.6%, which is high because a command with no SDK context and no
+client has almost everything left to test — every line that is not `main()` takes
+arguments, and nothing needs a credential. It is the ceiling this structure can
+reach, not a measure of a typical command.
 
 The reason is structural, and it is not going to change. The `print*` functions
 take a **live SDK context** — `printBrokerHolding(ctx, mc *market.MarketContext)`,
@@ -2727,8 +2948,8 @@ The SDK offers **no seam** to fake one: it is a concrete struct over a concrete
 HTTP client and websocket, there is no interface to substitute, and there is no
 exported constructor that takes a transport. A test that wants to exercise
 `printBrokerHolding` therefore has to hold a real `*market.MarketContext`, which
-means credentials and a network round trip. **137 functions in this repo are at
-0.0% statement coverage**: all 15 `main()` functions, and 86 of the 110 `print*`
+means credentials and a network round trip. **138 functions in this repo are at
+0.0% statement coverage**: all 16 `main()` functions, and 86 of the 110 `print*`
 functions — the rest of that list is `do*` and `execute` bodies, plus
 `cmd/watchlist`'s `dispatch`, that sit behind the same wall. The count is
 `go test -count=1 -coverprofile=/tmp/cover.out ./...` followed by
@@ -2861,7 +3082,7 @@ Stated plainly, because the percentages above invite the wrong conclusion:
   tests substitute for, so nothing executes the function that would do it. The
   switch is covered; the client creation around it is not.
 - **Whether a read-only binary really is read-only.** The parser pins that all
-  eight call `cli.AssertReadOnly` and that the seven that can write do not. It
+  nine call `cli.AssertReadOnly` and that the seven that can write do not. It
   cannot check the judgement itself — that a binary classified as read-only
   issues no writes. That is still a human's call, made by reading the SDK calls,
   and `test/readonly_invariant_test.go` says so in its own doc comment.
@@ -2927,7 +3148,7 @@ $ go test -count=1 -run TestAssertReadOnly ./internal/cli/
 So the two-count is now **18 of 18**. The honest accounting is that two of them
 needed a new kind of test rather than another assertion: `main()` cannot be
 called from a test, so `test/` reads the source instead. See
-[the read-only invariant](#the-read-only-invariant-eight-binaries-assert-it).
+[the read-only invariant](#the-read-only-invariant-nine-binaries-assert-it).
 
 **The `cmd/watchlist` dispatcher round adds four more, and all four went red.**
 Each is a one-line edit to the switch that maps `-action` onto a handler, which
@@ -2995,7 +3216,7 @@ Seven capabilities, 31 requirements:
 | --- | --- |
 | `write-gates` | the six gates: what each one requires, in what order it refuses, and what a refusal guarantees about the network |
 | `exit-codes` | the four statuses, what each means, and the two classifications that are easiest to get wrong |
-| `read-only-invariant` | the eight read-only binaries, the assertion each one carries, and exit 1 for a violation |
+| `read-only-invariant` | the nine read-only binaries, the assertion each one carries, and exit 1 for a violation |
 | `config-loading` | credential precedence, which files are candidates, and which user errors are *not* missing-credential errors |
 | `secret-handling` | what the app key, app secret and access token render as, and the fixed-width mask |
 | `sdk-coverage` | that every exported method on every exported type is referenced or justified, that the scan cannot quietly shrink, and that the check proves only reference |
@@ -3100,15 +3321,15 @@ longbridge-go-demo/
 └── README.md
 ```
 
-`cmd/*/main_test.go` (and `cmd/fundamentals/actions_test.go`) hold the 329
-test functions and 1 965 cases for the thirteen binaries that have a suite, and
-`test/` adds 3 more functions and 18 cases that no single package could hold;
+`cmd/*/main_test.go` (and `cmd/fundamentals/actions_test.go`) hold the 375
+test functions and 2 093 cases for the fourteen binaries that have a suite, and
+`test/` adds 3 more functions and 19 cases that no single package could hold;
 see [Development](#development) for the per-package table and for why the coverage
 percentages there are lower than they look. `cmd/portfolio` and `cmd/watch` have
 no test file.
 
-Fifteen `cmd/` directories, fifteen `binaries` in the `Makefile`'s `BINARIES`
-list, and fifteen `run-*` targets.
+Sixteen `cmd/` directories, sixteen `binaries` in the `Makefile`'s `BINARIES`
+list, and sixteen `run-*` targets.
 
 ### A note on the module path
 

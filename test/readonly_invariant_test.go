@@ -5,8 +5,9 @@
 // order gate is still closed, and that assertion lives in main(), which no
 // in-process test can reach — running main() would need credentials, a network
 // and a live gate, and would exit the test binary besides. So the eight copies
-// went untested for as long as they existed, mutation testing confirmed it
-// (deleting any one of the eight left the suite green), and one of them had
+// that existed when this package was written went untested for as long as they
+// did, mutation testing confirmed it (deleting any one of the eight left the
+// suite green), and one of them had
 // already drifted from the documented contract while nobody was looking. This
 // package closes the gap from the outside: it parses the source and asserts the
 // shape of the startup sequence.
@@ -26,11 +27,22 @@ import (
 
 // readOnlyCommands maps each binary that issues no writes to the action string
 // it hands to AssertReadOnly — the same phrase GuardWrite would print had that
-// binary attempted a write, which is why the eight differ ("quote a symbol" is
+// binary attempted a write, which is why the nine differ ("quote a symbol" is
 // not "run the market reader"). The list is pinned against the cmd/ directory
-// listing below, so a ninth binary cannot be added without saying which kind it
-// is. internal/cli/cli_test.go holds the same eight pairs and drives them
+// listing below, so a tenth binary cannot be added without saying which kind it
+// is. internal/cli/cli_test.go holds the same nine pairs and drives them
 // through the helper itself.
+//
+// cmd/auth is in this list and not the other one, and the distinction is worth
+// stating because it is the first entry here that is not a market-data reader.
+// It authenticates: it makes no API request at all, so it cannot mutate an
+// account, and it therefore belongs with the readers. It does cause the SDK to
+// write ONE local file — the token cache at $HOME/.longbridge/openapi/tokens/
+// <client id>, mode 0600, written by the SDK and not by the command. That is
+// not an API write and not a file in this repository, and it is why the order
+// gate is still the right thing for this binary to assert: there is still no
+// write the gate could legitimately permit. AssertReadOnly only asks that
+// GuardWrite refuses; it says nothing about the filesystem.
 var readOnlyCommands = map[string]string{
 	"quote":        "quote a symbol",
 	"watch":        "run the watch streamer",
@@ -40,6 +52,7 @@ var readOnlyCommands = map[string]string{
 	"fundamentals": "run the fundamentals reader",
 	"market":       "run the market reader",
 	"screener":     "run the screener reader",
+	"auth":         "run the OAuth login",
 }
 
 // writeCommands are the binaries that can change something, and therefore
@@ -108,7 +121,7 @@ func stringArg(t *testing.T, call *ast.CallExpr, i int) string {
 }
 
 // TestReadOnlyCommands_AssertReadOnlyIsCalledInMain replaces the coverage the
-// eight copies never had. For each read-only binary it asserts, from the parsed
+// nine copies never had. For each read-only binary it asserts, from the parsed
 // source, that main() calls cli.AssertReadOnly exactly once, as a top-level
 // statement, on the configuration it just loaded and with the name and action
 // recorded above — and that it does so in the one position where the assertion
@@ -202,7 +215,7 @@ func TestReadOnlyCommands_AssertReadOnlyIsCalledInMain(t *testing.T) {
 			// show and no first request to precede, and the honest answer there
 			// is "nothing to compare" rather than a failure: whether those two
 			// conventions still hold is a different test's business. Every
-			// read-only binary today has both, so for the eight these checks
+			// read-only binary today has both, so for the nine these checks
 			// always run.
 			if banner == token.NoPos {
 				t.Logf("cmd/%s/main.go prints no [config] banner, so there is nothing "+

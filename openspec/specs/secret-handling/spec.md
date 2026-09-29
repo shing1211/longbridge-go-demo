@@ -77,3 +77,61 @@ The printable form of a secret SHALL distinguish "not set" from "set", so that a
 
 - **WHEN** the same secret is rendered once empty and once populated
 - **THEN** the two renderings differ, and neither contains the populated value
+
+### Requirement: A header value is masked according to what its name says it is
+
+A header sent with every request SHALL be rendered in the startup summary masked whenever its name contains `token`, `secret`, `key`, `auth`, `pass`, `credential` or `cookie`, case-insensitively, and SHALL be rendered in full otherwise. The masked form SHALL be the same fixed-width mask used for the app key, and SHALL never be the whole value. The name SHALL be shown beside the value, so that a reader can tell which values were shortened.
+
+#### Scenario: A credential-sounding name is masked
+
+- **WHEN** the summary is produced with a header named `x-access-token`
+- **THEN** its value appears only as a mask and no part of the whole value appears
+
+#### Scenario: A plain name is shown in full
+
+- **WHEN** the summary is produced with a header named `x-trace-id`
+- **THEN** its value appears unchanged
+
+#### Scenario: The decision follows the name alone
+
+- **WHEN** two headers carry values of identical shape, one named with a credential fragment and one without
+- **THEN** only the one whose name carries a fragment is masked
+
+#### Scenario: A name that merely contains a fragment is masked too
+
+- **WHEN** a header is named `x-passenger` or `x-keynote`
+- **THEN** its value is masked, because the fragment appears in the name
+
+#### Scenario: A header with no value is distinguishable from one with a value
+
+- **WHEN** a header is supplied with an empty value
+- **THEN** its printable form is the literal unset marker
+
+#### Scenario: The source of a header is reported
+
+- **WHEN** the summary lists a header
+- **THEN** it names the flag, variable or file that supplied it
+
+### Requirement: A refusal about a header never prints its value
+
+A failure caused by a header SHALL name the header and SHALL NOT print its value, in any source and for any reason, including a malformed argument, an unusable name and a refused credential header.
+
+#### Scenario: A malformed argument is refused without its value
+
+- **WHEN** a `-header` argument has no `=`
+- **THEN** the failure explains the expected form and prints neither the argument nor any part of it
+
+#### Scenario: A refused credential header prints nothing of its value
+
+- **WHEN** `-header authorization=something` is refused
+- **THEN** the failure names the header and the string given as its value appears nowhere in the output
+
+#### Scenario: An environment header is refused without its value
+
+- **WHEN** a variable with the header prefix is refused
+- **THEN** the failure names the variable and prints no part of its value
+
+#### Scenario: The diagnostic goes to standard error
+
+- **WHEN** a header is refused
+- **THEN** the report is written to standard error and nothing is written to standard output

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"os"
 	"strconv"
 	"strings"
@@ -1528,4 +1529,450 @@ func splitStatusBlocks(t *testing.T, lines []string) (live, delay string) {
 		t.Fatalf("want a live block and a delay block, got:\n%s", strings.Join(lines, "\n"))
 	}
 	return strings.Join(liveLines, "\n"), strings.Join(delayLines, "\n")
+}
+
+// ------------------------------------------- market.TradeStatus.UnmarshalJSON
+//
+// The one thing the SDK's coverage check cannot see, and the reason this
+// section exists. encoding/json calls UnmarshalJSON implicitly for any field of
+// type market.TradeStatus, so no call site naming the method exists anywhere in
+// cmd/ for the Makefile's grep to find, and the method stays allow-listed
+// `not-used` however much real decoding this file does. Only a decode proves
+// anything about it.
+//
+// The wording above is deliberate. The scan is a plain grep over the file text,
+// comments included, so a comment containing the method name followed by an
+// opening parenthesis is indistinguishable from a call site and would move the
+// method off the allow-list on the strength of a sentence. The allow-list entry
+// stays; this comment is written so that it does not accidentally remove it.
+//
+// # THE WIRE FORMAT IS A NUMBER, AND NOTHING ELSE
+//
+// The method decodes a JSON number into an int32 and runs it through
+// TradeStatusFromCode. It does not accept the name form. Measured, not assumed:
+// `json.Unmarshal([]byte("\"Trading\""), &s)` fails with "cannot unmarshal
+// string into Go value of type int32", and so does a float, a bool, an object
+// and any code outside int32. Note that the error names int32 rather than
+// market.TradeStatus, because the failure happens inside the method's own
+// json.Unmarshal call and encoding/json passes the inner error straight
+// through — which is a confusing message to hand a user, and is asserted below
+// so that a change to it is a deliberate one.
+//
+// # NOT REACHED BY THE SDK ITSELF (VERIFIED, v0.25.2)
+//
+// Nothing in the SDK decodes a market.TradeStatus from JSON. The HTTP path
+// decodes market/jsontypes.MarketStatusResponse, whose fields are plain int32,
+// and then calls TradeStatusFromCode by hand (market/context.go, MarketStatus).
+// The websocket path does not involve JSON at all: quote/core.go unmarshals a
+// protobuf and copier fills a quote.PushQuote, whose TradeStatus is a different
+// type in the quote package. So this method is reachable only by a caller who
+// declares a struct with a market.TradeStatus field of their own — which is
+// what the table-driven payload below does.
+
+// everyTradeStatusCode is the SDK's code table, transcribed from the constants
+// in market/trade_status.go, together with the name each renders. It is used
+// three ways below: as the round-trip corpus, as the expected answer for the
+// decode tests, and — with the sweep in TestTradeStatusUnmarshalJSON_KnownCodesAreExactlyTheTable —
+// as the thing a new SDK constant would fail to join.
+var everyTradeStatusCode = []struct {
+	code int32
+	name string
+	want market.TradeStatus
+}{
+	{-1, "TradeStatusUnknown", market.TradeStatusUnknown},
+	{0, "TradeStatusNoRegisterQuote", market.TradeStatusNoRegisterQuote},
+	{101, "TradeStatusClean", market.TradeStatusClean},
+	{102, "TradeStatusOpenBid", market.TradeStatusOpenBid},
+	{103, "TradeStatusMorningClosing", market.TradeStatusMorningClosing},
+	{105, "TradeStatusTrading", market.TradeStatusTrading},
+	{106, "TradeStatusNoonClosing", market.TradeStatusNoonClosing},
+	{107, "TradeStatusCloseBid", market.TradeStatusCloseBid},
+	{108, "TradeStatusClosing", market.TradeStatusClosing},
+	{110, "TradeStatusDarkWait", market.TradeStatusDarkWait},
+	{111, "TradeStatusDarkTrading", market.TradeStatusDarkTrading},
+	{112, "TradeStatusDarkClosing", market.TradeStatusDarkClosing},
+	{120, "TradeStatusAfterFix", market.TradeStatusAfterFix},
+	{121, "TradeStatusHalfClosing", market.TradeStatusHalfClosing},
+	{122, "TradeStatusNotOpened", market.TradeStatusNotOpened},
+	{123, "TradeStatusRealtimeQuote", market.TradeStatusRealtimeQuote},
+	{201, "TradeStatusUSPrev", market.TradeStatusUSPrev},
+	{202, "TradeStatusUSTrading", market.TradeStatusUSTrading},
+	{203, "TradeStatusUSAfter", market.TradeStatusUSAfter},
+	{204, "TradeStatusUSClosing", market.TradeStatusUSClosing},
+	{205, "TradeStatusUSStop", market.TradeStatusUSStop},
+	{206, "TradeStatusUSClean", market.TradeStatusUSClean},
+	{207, "TradeStatusUSNight", market.TradeStatusUSNight},
+	{209, "TradeStatusUSPrevMarketClean", market.TradeStatusUSPrevMarketClean},
+	{210, "TradeStatusUSAfterMarketClean", market.TradeStatusUSAfterMarketClean},
+	{1000, "TradeStatusRefresh", market.TradeStatusRefresh},
+	{1001, "TradeStatusDelist", market.TradeStatusDelist},
+	{1002, "TradeStatusPrepare", market.TradeStatusPrepare},
+	{1003, "TradeStatusCodeChange", market.TradeStatusCodeChange},
+	{1004, "TradeStatusStop", market.TradeStatusStop},
+	{1005, "TradeStatusWillOpen", market.TradeStatusWillOpen},
+	{1006, "TradeStatusCommonSuspend", market.TradeStatusCommonSuspend},
+	{1007, "TradeStatusExpire", market.TradeStatusExpire},
+	{1008, "TradeStatusNoQuote", market.TradeStatusNoQuote},
+	{1009, "TradeStatusUnited", market.TradeStatusUnited},
+	{1010, "TradeStatusTradingHalt", market.TradeStatusTradingHalt},
+	{1011, "TradeStatusWaitListing", market.TradeStatusWaitListing},
+	{2001, "TradeStatusFuse", market.TradeStatusFuse},
+}
+
+// The implicit path, not a direct call: json.Unmarshal on a bare value, on a
+// struct field and inside a slice, a map and a pointer. A struct field is the
+// case that matters, because that is the only way this method is ever reached
+// in practice, and the tag on the field is the only thing a caller controls.
+func TestTradeStatusUnmarshalJSON_ImplicitPathDecodesNumericCodes(t *testing.T) {
+	t.Run("a bare value", func(t *testing.T) {
+		var s market.TradeStatus
+		if err := json.Unmarshal([]byte("202"), &s); err != nil {
+			t.Fatalf("unmarshal 202: %v", err)
+		}
+		if s != market.TradeStatusUSTrading {
+			t.Errorf("202 decoded to %d, want TradeStatusUSTrading", s.Code())
+		}
+	})
+
+	t.Run("a struct field, the shape the wire actually has", func(t *testing.T) {
+		// The payload is the shape of a /v1/quote/market-status market_time
+		// entry. Its numbers come from the SDK's interface contract, not from
+		// a response this project has seen: no successful authenticated
+		// response has ever been observed here.
+		const payload = `[{"market":"US","trade_status":202,"delay_trade_status":204}]`
+		var got []struct {
+			Market           string             `json:"market"`
+			TradeStatus      market.TradeStatus `json:"trade_status"`
+			DelayTradeStatus market.TradeStatus `json:"delay_trade_status"`
+		}
+		if err := json.Unmarshal([]byte(payload), &got); err != nil {
+			t.Fatalf("unmarshal the payload: %v", err)
+		}
+		if len(got) != 1 {
+			t.Fatalf("got %d entries, want 1", len(got))
+		}
+		if got[0].TradeStatus != market.TradeStatusUSTrading {
+			t.Errorf("trade_status = %d, want TradeStatusUSTrading", got[0].TradeStatus.Code())
+		}
+		if got[0].DelayTradeStatus != market.TradeStatusUSClosing {
+			t.Errorf("delay_trade_status = %d, want TradeStatusUSClosing", got[0].DelayTradeStatus.Code())
+		}
+	})
+
+	t.Run("a slice, a map and a pointer", func(t *testing.T) {
+		var list []market.TradeStatus
+		if err := json.Unmarshal([]byte(`[105,4242,2001]`), &list); err != nil {
+			t.Fatalf("slice: %v", err)
+		}
+		if len(list) != 3 || list[0] != market.TradeStatusTrading ||
+			list[1] != market.TradeStatusUnknown || list[2] != market.TradeStatusFuse {
+			t.Errorf("slice decoded to %v, want [Trading Unknown Fuse]", list)
+		}
+		byMarket := map[string]market.TradeStatus{}
+		if err := json.Unmarshal([]byte(`{"HK":108,"US":9999}`), &byMarket); err != nil {
+			t.Fatalf("map: %v", err)
+		}
+		if byMarket["HK"] != market.TradeStatusClosing {
+			t.Errorf("HK = %d, want TradeStatusClosing", byMarket["HK"].Code())
+		}
+		if byMarket["US"] != market.TradeStatusUnknown {
+			t.Errorf("US = %d, want TradeStatusUnknown for a code the SDK does not define",
+				byMarket["US"].Code())
+		}
+		one := new(market.TradeStatus)
+		if err := json.Unmarshal([]byte("107"), one); err != nil {
+			t.Fatalf("pointer: %v", err)
+		}
+		if *one != market.TradeStatusCloseBid {
+			t.Errorf("107 decoded to %d, want TradeStatusCloseBid", one.Code())
+		}
+	})
+}
+
+// Every code in the table, and the boundaries around it. The SDK collapses an
+// unrecognised code to TradeStatusUnknown rather than failing, which is the
+// behaviour that makes a status section safe to print, and it is asserted here
+// rather than assumed.
+func TestTradeStatusUnmarshalJSON_CodesAndBoundaries(t *testing.T) {
+	tests := []struct {
+		name string
+		json string
+		want int32
+	}{
+		{"below the first code in the table", "-2", market.TradeStatusUnknown.Code()},
+		{"the first code in the table", "-1", market.TradeStatusUnknown.Code()},
+		{"the zero value, which is a defined code", "0", market.TradeStatusNoRegisterQuote.Code()},
+		{"a gap in the middle of the table", "104", market.TradeStatusUnknown.Code()},
+		{"regular trading", "105", market.TradeStatusTrading.Code()},
+		{"the last code in the table", "2001", market.TradeStatusFuse.Code()},
+		{"one above the last", "2002", market.TradeStatusUnknown.Code()},
+		{"far above the last", "99999", market.TradeStatusUnknown.Code()},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var s market.TradeStatus
+			if err := json.Unmarshal([]byte(tt.json), &s); err != nil {
+				t.Fatalf("unmarshal %s: %v", tt.json, err)
+			}
+			if s.Code() != tt.want {
+				t.Errorf("%s decoded to %d, want %d", tt.json, s.Code(), tt.want)
+			}
+			// An unrecognised code must land on the documented "unknown"
+			// representation, not on some other defined status.
+			if tt.want == market.TradeStatusUnknown.Code() && s != market.TradeStatusUnknown {
+				t.Errorf("%s decoded to %d, which is a defined status, want TradeStatusUnknown",
+					tt.json, s.Code())
+			}
+			if tt.want == market.TradeStatusUnknown.Code() && s.Name() != "Unknown" {
+				t.Errorf("%s decoded to a status named %q, want \"Unknown\"", tt.json, s.Name())
+			}
+		})
+	}
+}
+
+// "Absent" has to be a distinguishable state and it is three different things,
+// which is the whole reason this test exists. The zero value is a DEFINED code
+// (quote not registered), it is not the same as the unknown sentinel, and
+// neither of them is the same as a real status — yet the two of them render
+// identically through Name(), so only the code can tell them apart.
+func TestTradeStatusUnmarshalJSON_AbsentIsDistinguishableAndNullIsNotAbsence(t *testing.T) {
+	t.Run("the zero value is a defined code, not the unknown sentinel", func(t *testing.T) {
+		var s market.TradeStatus
+		if err := json.Unmarshal([]byte("0"), &s); err != nil {
+			t.Fatalf("unmarshal 0: %v", err)
+		}
+		if s != market.TradeStatusNoRegisterQuote {
+			t.Errorf("0 decoded to %d, want TradeStatusNoRegisterQuote", s.Code())
+		}
+		if s == market.TradeStatusUnknown {
+			t.Error("0 and -1 are the same value, so an unregistered quote and an " +
+				"unrecognised code would be indistinguishable")
+		}
+		if s == market.TradeStatusTrading {
+			t.Error("0 decoded to a real status, so absence would be unreadable")
+		}
+		if !statusAbsent(s) {
+			t.Errorf("statusAbsent(0) = false; the section prints \"-\" for it and " +
+				"must not print a status instead")
+		}
+	})
+
+	t.Run("the two absent codes share a name, so the code is the only discriminator", func(t *testing.T) {
+		// Worth pinning because it is the trap in using Name() to decide
+		// whether a status is real: "Unknown" covers both, and a caller
+		// comparing names would treat a quote-not-registered as a parse
+		// failure.
+		if market.TradeStatusNoRegisterQuote.Name() != market.TradeStatusUnknown.Name() {
+			t.Skip("the two absent codes now render differently; the name can " +
+				"distinguish them and the comment above is out of date")
+		}
+		if market.TradeStatusNoRegisterQuote.String() != market.TradeStatusUnknown.String() {
+			t.Error("String() and Name() disagree for the two absent codes")
+		}
+	})
+
+	t.Run("an absent field leaves the field alone", func(t *testing.T) {
+		type row struct {
+			Market      string             `json:"market"`
+			TradeStatus market.TradeStatus `json:"trade_status"`
+		}
+		got := row{Market: "US", TradeStatus: market.TradeStatusUSTrading}
+		if err := json.Unmarshal([]byte(`{"market":"US"}`), &got); err != nil {
+			t.Fatalf("unmarshal: %v", err)
+		}
+		if got.TradeStatus != market.TradeStatusUSTrading {
+			t.Errorf("a field the payload omits came back as %d, want the "+
+				"previous value %d: encoding/json does not visit absent fields",
+				got.TradeStatus.Code(), market.TradeStatusUSTrading.Code())
+		}
+	})
+
+	t.Run("null is NOT absence; it decodes to the zero code", func(t *testing.T) {
+		// The convention most UnmarshalJSON implementations follow is that a
+		// JSON null leaves the destination untouched, and this one does not:
+		// it decodes null into the int32 as 0, which is a DEFINED status
+		// (quote not registered). A payload with "trade_status": null would
+		// therefore print as a real status rather than as "-". Measured, and
+		// asserted rather than left to be discovered by a user.
+		var s market.TradeStatus = market.TradeStatusUSTrading
+		if err := json.Unmarshal([]byte("null"), &s); err != nil {
+			t.Fatalf("unmarshal null: %v", err)
+		}
+		if s != market.TradeStatusNoRegisterQuote {
+			t.Errorf("null left the value at %d, want it decoded to 0 "+
+				"(TradeStatusNoRegisterQuote); if this ever changes it is a "+
+				"behaviour change worth a comment, not a silent fix", s.Code())
+		}
+	})
+}
+
+// A rejected payload must leave the destination as it was. It does — the
+// method returns before assigning — and that is worth pinning, because a
+// half-decoded status printed as a real one is worse than an error.
+func TestTradeStatusUnmarshalJSON_BadJSONIsAnErrorAndChangesNothing(t *testing.T) {
+	tests := []struct {
+		name string
+		json string
+		// reachesMethod is false for a payload the outer scanner rejects
+		// before UnmarshalJSON runs, which therefore produces a different
+		// error entirely.
+		reachesMethod bool
+	}{
+		{name: "the name form, which is not a wire form", json: `"Trading"`, reachesMethod: true},
+		{name: "an integral float", json: "105.0", reachesMethod: true},
+		{name: "an exponent", json: "1e3", reachesMethod: true},
+		{name: "a bool", json: "true", reachesMethod: true},
+		{name: "an object", json: "{}", reachesMethod: true},
+		{name: "an array", json: "[]", reachesMethod: true},
+		{name: "a code that overflows int32", json: "2147483648", reachesMethod: true},
+		{name: "trailing rubbish", json: "105x"},
+		{name: "an empty document", json: ``},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := market.TradeStatusUSTrading
+			err := json.Unmarshal([]byte(tt.json), &s)
+			if err == nil {
+				t.Fatalf("unmarshal %s = nil error, want a rejection", tt.json)
+			}
+			if s != market.TradeStatusUSTrading {
+				t.Errorf("a rejected payload left %d behind, want the previous "+
+					"value %d unchanged", s.Code(), market.TradeStatusUSTrading.Code())
+			}
+			if !tt.reachesMethod {
+				return
+			}
+			// The message names int32, not market.TradeStatus, because the
+			// failure is the inner json.Unmarshal(data, &code) passed straight
+			// through. Confusing to a user, so it is pinned.
+			if !strings.Contains(err.Error(), "int32") {
+				t.Errorf("error = %q; it is expected to name int32, the type the "+
+					"method decodes into", err)
+			}
+		})
+	}
+}
+
+// MEASURED, and the surprising part: marshal and decode are symmetric for every
+// code the SDK defines, because TradeStatus has no MarshalJSON at all and is
+// marshalled as the int32 it is. What is NOT symmetric is everything else, and
+// both asymmetries are asserted below rather than left as folklore.
+func TestTradeStatusUnmarshalJSON_MarshalAndRoundTrip(t *testing.T) {
+	t.Run("every defined code survives a round trip unchanged", func(t *testing.T) {
+		for _, tt := range everyTradeStatusCode {
+			encoded, err := json.Marshal(tt.want)
+			if err != nil {
+				t.Fatalf("%s: marshal: %v", tt.name, err)
+			}
+			if want := strconv.Itoa(int(tt.code)); string(encoded) != want {
+				t.Errorf("%s marshalled to %s, want the bare number %s: there is "+
+					"no MarshalJSON on this type, so encoding/json writes the "+
+					"underlying int32", tt.name, encoded, want)
+			}
+			var back market.TradeStatus
+			if err := json.Unmarshal(encoded, &back); err != nil {
+				t.Fatalf("%s: re-parse %s: %v", tt.name, encoded, err)
+			}
+			if back != tt.want {
+				t.Errorf("%s round-tripped to %d, want %d", tt.name, back.Code(), tt.code)
+			}
+		}
+	})
+
+	t.Run("ASYMMETRY: the name form does not decode back", func(t *testing.T) {
+		// Name() and String() are for printing. Encoded as JSON they are a
+		// JSON string, which the decoder rejects, so a status rendered for a
+		// human cannot be read back by the same type. Anything that persists
+		// a status has to write the number.
+		for _, tt := range everyTradeStatusCode {
+			encoded, err := json.Marshal(tt.want.Name())
+			if err != nil {
+				t.Fatalf("marshal name: %v", err)
+			}
+			if !strings.HasPrefix(string(encoded), `"`) {
+				t.Fatalf("Name() marshalled to %s, expected a JSON string", encoded)
+			}
+			var back market.TradeStatus
+			if err := json.Unmarshal(encoded, &back); err == nil {
+				t.Errorf("the name form %s decoded to %d with no error; the "+
+					"decoder is meant to accept numbers only", encoded, back.Code())
+			}
+		}
+	})
+
+	t.Run("ASYMMETRY: an unrecognised code is lost on the way through", func(t *testing.T) {
+		// Decode, then re-encode: the original number is gone, because the
+		// decoder replaced it with the -1 sentinel. So a status that arrived
+		// with a code this SDK version does not know cannot be forwarded
+		// intact, and -1 is what the other end would receive.
+		const raw = "4242"
+		var s market.TradeStatus
+		if err := json.Unmarshal([]byte(raw), &s); err != nil {
+			t.Fatalf("unmarshal %s: %v", raw, err)
+		}
+		if s.Code() != market.TradeStatusUnknown.Code() {
+			t.Fatalf("%s decoded to %d, want the unknown sentinel", raw, s.Code())
+		}
+		encoded, err := json.Marshal(s)
+		if err != nil {
+			t.Fatalf("marshal: %v", err)
+		}
+		if string(encoded) != "-1" {
+			t.Errorf("re-encoding the decoded status produced %s, want -1: the "+
+				"original code is not recoverable", encoded)
+		}
+		// The other direction, which is the one that can surprise a writer:
+		// a value the SDK never produced by decoding still marshals as itself,
+		// because there is no MarshalJSON to normalise it.
+		out, err := json.Marshal(market.TradeStatus(4242))
+		if err != nil {
+			t.Fatalf("marshal an undefined value: %v", err)
+		}
+		if string(out) != raw {
+			t.Errorf("marshalling an undefined value produced %s, want %s", out, raw)
+		}
+	})
+}
+
+// The table above is a transcription, so it can drift from the SDK. This is
+// the check that it has not: sweeping the code space, the set of codes that
+// decode to themselves must be exactly the table, which also pins that nothing
+// outside the table is a known status.
+func TestTradeStatusUnmarshalJSON_KnownCodesAreExactlyTheTable(t *testing.T) {
+	known := map[int32]string{}
+	for _, tt := range everyTradeStatusCode {
+		known[tt.code] = tt.name
+	}
+	if len(known) != len(everyTradeStatusCode) {
+		t.Fatalf("the table has a duplicate code, so it cannot be compared with "+
+			"the SDK's own: %d rows, %d distinct codes", len(everyTradeStatusCode), len(known))
+	}
+
+	for code := tradeStatusSweepLo; code <= tradeStatusSweepHi; code++ {
+		var s market.TradeStatus
+		if err := json.Unmarshal([]byte(strconv.Itoa(code)), &s); err != nil {
+			t.Fatalf("code %d: %v", code, err)
+		}
+		_, inTable := known[int32(code)]
+		switch {
+		case inTable && s.Code() != int32(code):
+			t.Errorf("code %d (%s) decoded to %d; the table lists it as known, "+
+				"so either the SDK dropped it or this transcription is wrong",
+				code, known[int32(code)], s.Code())
+		case !inTable && s.Code() != market.TradeStatusUnknown.Code():
+			t.Errorf("code %d is not in the table but decoded to %d, which is a "+
+				"defined status; add it to everyTradeStatusCode", code, s.Code())
+		}
+	}
+
+	// And the boundaries the sweep is too wide to be a natural place for.
+	for _, code := range []int32{tradeStatusSweepLo - 1, tradeStatusSweepHi + 1} {
+		var s market.TradeStatus
+		if err := json.Unmarshal([]byte(strconv.Itoa(int(code))), &s); err != nil {
+			t.Fatalf("code %d: %v", code, err)
+		}
+		if s != market.TradeStatusUnknown {
+			t.Errorf("code %d decoded to %d, want the unknown sentinel", code, s.Code())
+		}
+	}
 }

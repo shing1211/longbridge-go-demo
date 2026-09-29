@@ -131,3 +131,66 @@ Credentials SHALL be read from `LONGBRIDGE_APP_KEY`, `LONGBRIDGE_APP_SECRET` and
 
 - **WHEN** some but not all credentials resolve
 - **THEN** the failure names every absent one in a single report, sorted, rather than one per run
+
+### Requirement: Extra request headers come from three sources in a fixed order
+
+Extra HTTP headers sent with every request SHALL be read from the repeatable `-header NAME=VALUE` flag, from environment variables named `LONGPORT_HEADER_<NAME>`, and from a `headers:` mapping inside the `longbridge:` block of the YAML file, and the flag SHALL take precedence over the environment and the environment over the file. The flag SHALL split each argument on the first `=` only, SHALL trim the name and SHALL not trim the value.
+
+#### Scenario: The flag may be repeated
+
+- **WHEN** `-header` is given more than once
+- **THEN** every header named is sent, one per occurrence
+
+#### Scenario: A value containing an equals sign survives
+
+- **WHEN** a `-header` argument's value contains `=`
+- **THEN** only the first `=` separates the name from the value, and the rest is the value
+
+#### Scenario: The environment beats the file
+
+- **WHEN** one header name is set both by `LONGPORT_HEADER_<NAME>` and by the YAML `headers:` mapping
+- **THEN** the environment's value is the one sent
+
+#### Scenario: The flag beats both
+
+- **WHEN** one header name is supplied by all three sources
+- **THEN** the value given with `-header` is the one sent
+
+#### Scenario: Two spellings of one name are one header
+
+- **WHEN** the same header name is supplied twice, differing only in case
+- **THEN** exactly one header is sent, holding the value supplied last
+
+#### Scenario: A header needs no code change to be added
+
+- **WHEN** a variable named `LONGPORT_HEADER_<NAME>` is set for a header name nothing anticipated
+- **THEN** that header is sent, with each `_` after the prefix read as `-` and the name lower-cased
+
+### Requirement: A header may not replace a credential the command sends itself
+
+The headers `x-api-key`, `authorization`, `x-api-signature` and `x-timestamp` SHALL be refused, from every source and in any case, and the refusal SHALL name the header and SHALL NOT echo its value. A name differing only in case SHALL be refused the same way.
+
+#### Scenario: A credential header on the command line is refused
+
+- **WHEN** `-header authorization=anything` is passed
+- **THEN** the command fails naming `authorization`, prints no value, and exits `1`
+
+#### Scenario: A credential header from the environment is refused
+
+- **WHEN** `LONGPORT_HEADER_AUTHORIZATION` is set
+- **THEN** the command fails naming that variable, prints no value, and exits `1`
+
+#### Scenario: A credential header from the file is refused
+
+- **WHEN** the YAML `headers:` mapping contains `authorization`
+- **THEN** the command fails naming that entry, prints no value, and exits `1`
+
+#### Scenario: Only the case differs
+
+- **WHEN** a credential header is supplied with different capitalisation
+- **THEN** it is refused in the same way, because header names are not case-sensitive
+
+#### Scenario: The refusal arrives before the credentials are needed
+
+- **WHEN** a credential header is refused and no credential is configured
+- **THEN** the reported failure is the refused header rather than a missing credential, and the process exits `1` rather than `2`

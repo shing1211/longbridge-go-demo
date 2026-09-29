@@ -8,11 +8,11 @@ The point of a demonstration built on someone else's client library is to have u
 
 ### Requirement: Every exported method on an exported type is referenced or justified
 
-Every exported method declared on an exported type the interface library exposes SHALL either be referenced from code under the command directory or carry exactly one allow-list entry. The check SHALL span the whole exported surface, not only the command-context types, and the scanned total SHALL be 206 type-and-method pairs.
+Every exported method declared on an exported type the interface library exposes SHALL either be referenced from code under the command or shared-internal directories or carry exactly one allow-list entry. The check SHALL span the whole exported surface, not only the command-context types, and the scanned total SHALL be 206 type-and-method pairs.
 
 #### Scenario: A method with no call site fails the check
 
-- **WHEN** an exported method has no reference anywhere under the command directory and no allow-list entry
+- **WHEN** an exported method has no reference anywhere under the command or shared-internal directories and no allow-list entry
 - **THEN** the check fails and names the method as neither referenced nor allow-listed
 
 #### Scenario: The check spans every exported type
@@ -38,7 +38,7 @@ Every exported method declared on an exported type the interface library exposes
 #### Scenario: The current state is complete
 
 - **WHEN** the check runs against the interface library version this project depends on
-- **THEN** it reports 176 of the 206 methods referenced from command code, 30 justified on the allow-list, and none in neither state
+- **THEN** it reports 184 of the 206 methods referenced from command or shared-internal code, 22 justified on the allow-list, and none in neither state
 
 ### Requirement: The scan is receiver-name-agnostic and the total is pinned
 
@@ -61,7 +61,7 @@ The check SHALL identify a method without depending on the identifier a receiver
 
 ### Requirement: An allow-list entry states one reason from a fixed vocabulary
 
-Every allow-list entry SHALL name exactly one reason, and the reason SHALL be one of `internal`, `unimportable` or `not-used`. The current 30 entries SHALL consist of 21 `internal`, 1 `unimportable` and 8 `not-used`.
+Every allow-list entry SHALL name exactly one reason, and the reason SHALL be one of `internal`, `unimportable` or `not-used`. The current 22 entries SHALL consist of 19 `internal`, 1 `unimportable` and 2 `not-used`.
 
 #### Scenario: A reason word outside the vocabulary is refused
 

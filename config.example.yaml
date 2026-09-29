@@ -51,8 +51,22 @@ longbridge:
   # auth_timeout: 15s
   # timeout: 15s
 
-  # SDK log level: trace, debug, info, warn, error.
+  # SDK log level: trace, debug, info, warn, error. `trace` is accepted here and
+  # honoured by nothing — the SDK's logger implements debug/info/warn/error only.
   # log_level: info
+
+  # --- extra HTTP headers, sent with every request --------------------------
+  # DEMO-SPECIFIC: the SDK's own reader ignores this block; the headers are
+  # applied by this project's loader, which refuses the four names the SDK uses
+  # for the request credential (x-api-key, authorization, x-api-signature,
+  # x-timestamp). Setting one of those would silently REPLACE the credential.
+  #
+  # Environment variables win over this block, and -header NAME=VALUE on the
+  # command line wins over both. The environment spelling of one header is
+  # LONGPORT_HEADER_<NAME>, e.g. LONGPORT_HEADER_X_TRACE_ID=abc123.
+  # headers:
+  #   x-trace-id: abc123
+  #   x-tenant: demo
 
 # ---------------------------------------------------------------------------
 # DEMO SAFETY SWITCHES

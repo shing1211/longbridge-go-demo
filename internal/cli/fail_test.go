@@ -10,6 +10,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/longbridge/openapi-go/oauth"
+
 	appcfg "github.com/shing1211/longbridge-go-demo/internal/config"
 )
 
@@ -146,11 +148,11 @@ func TestHelperProcess(t *testing.T) {
 		cfg := &appcfg.Config{Mode: appcfg.ModeSimulated, DryRun: true}
 		Fail(appcfg.AlertGuard.Check(cfg, true, "delete price alert 99"))
 
-	// --- the invariant the eight read-only binaries share -------------------
+	// --- the invariant the read-only binaries share -------------------------
 	case "read-only-assertion-open-gate":
 		// Their startup assertion, with the order gate open. Name and action
 		// arrive in the environment so that one scenario can stand in for all
-		// eight binaries; it defaults to market so it still means something if
+		// of them; it defaults to market so it still means something if
 		// it is ever run on its own. openGate is the single config the closed-
 		// gate table in cli_test.go proves GuardWrite admits.
 		name, action := os.Getenv("HELPER_NAME"), os.Getenv("HELPER_ACTION")
@@ -170,6 +172,24 @@ func TestHelperProcess(t *testing.T) {
 		// The path every one of the commands takes on a fresh machine. It must
 		// name all three missing variables at once and exit 2.
 		NewUsage("demo", "s").Load()
+
+	case "load-oauth-bad-mode":
+		// cmd/auth's loader, which asks for no credential at all — so the way
+		// it can fail at startup is a bad switch, and that has to be a plain
+		// exit 1 rather than the missing-credentials exit 2, which would be
+		// about the app-key triple this path never needed.
+		NewUsage("demo", "s").LoadOAuth(oauth.New("client-id"))
+
+	// --- Parse: the shared flags ------------------------------------------
+	case "parse-reserved-header":
+		// The security case. The flag layer has to refuse it on its own, with
+		// no credentials present, because a credential header that silently
+		// replaced the real one would not fail until the first request — and it
+		// would fail at the far end instead of here.
+		NewUsage("demo", "s").Parse([]string{"-header", os.Getenv("HELPER_HEADER")})
+
+	case "parse-bad-log-level":
+		NewUsage("demo", "s").Parse([]string{"-log-level", os.Getenv("HELPER_LEVEL")})
 
 	// --- Run --------------------------------------------------------------
 	case "run-blocked":
@@ -520,6 +540,27 @@ func TestUsage_LoadWithoutCredentialsExitsTwo(t *testing.T) {
 	}
 }
 
+// cmd/auth loads its configuration through a different loader, because OAuth
+// needs no app-key triple. The two must not be confused with each other: a bad
+// switch is a usage error (exit 1) whichever loader found it, and the
+// missing-credentials exit 2 must stay reserved for the triple the OAuth path
+// does not ask for.
+func TestUsage_LoadOAuthReportsABadSwitchAsExitOne(t *testing.T) {
+	res := runHelperWith(t, "load-oauth-bad-mode", credentialEnv,
+		"LONGPORT_MODE=sandbox")
+	if res.code != 1 {
+		t.Errorf("LoadOAuth() with a bad LONGPORT_MODE exited %d, want 1.\nstdout:\n%s\nstderr:\n%s",
+			res.code, res.stdout, res.stderr)
+	}
+	if !strings.Contains(res.stderr, `invalid LONGPORT_MODE="sandbox"`) {
+		t.Errorf("stderr does not name the variable to fix:\n%s", res.stderr)
+	}
+	if strings.Contains(res.stderr, "missing Longbridge credentials") {
+		t.Errorf("the OAuth loader must not report a missing credential; it asks "+
+			"for none:\n%s", res.stderr)
+	}
+}
+
 // An open order gate in a read-only binary is a misconfiguration, not a
 // refusal, so it exits 1 — nothing was blocked, because nothing was ever
 // attempted, and 3 would tell a wrapping script that a write had been declined.
@@ -562,5 +603,83 @@ func TestFail_RunPropagatesARefusalToExit3(t *testing.T) {
 	}
 	if !strings.Contains(res.stderr, "watchlist write refused") {
 		t.Errorf("stderr = %q, want the guard's reason", res.stderr)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// -header and -log-level at the exit-code level
+// ---------------------------------------------------------------------------
+
+// A reserved header is a usage error, and it has to be caught at flag-parse
+// time rather than at load time: with no credentials in the environment, a
+// load-time check would report the missing credential first and exit 2, which
+// says nothing about the header the operator actually got wrong.
+func TestUsage_AReservedHeaderExitsOneWithNoCredentialsPresent(t *testing.T) {
+	tests := []struct {
+		name   string
+		header string
+		want   string
+	}{
+		{"authorization, the credential itself", "authorization=stolen-token-value", "authorization"},
+		{"x-api-key", "x-api-key=stolen-token-value", "x-api-key"},
+		{"x-api-signature", "x-api-signature=stolen-token-value", "x-api-signature"},
+		{"x-timestamp", "x-timestamp=stolen-token-value", "x-timestamp"},
+		{"a spelling that only differs in case", "AUTHORIZATION=stolen-token-value", "AUTHORIZATION"},
+		{"no equals sign", "nonsense-value", `has no "="`},
+		{"an empty name", "=value", "name is empty"},
+		{"a name with a space", "bad name=value", "not a valid HTTP header name"},
+		{"a value carrying a newline", "x-a=one\ntwo", "net/http refuses to send"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			res := runHelperWith(t, "parse-reserved-header", credentialEnv,
+				"HELPER_HEADER="+tt.header)
+			if res.code != 1 {
+				t.Errorf("-header %q exited %d, want 1.\nstdout:\n%s\nstderr:\n%s",
+					tt.header, res.code, res.stdout, res.stderr)
+			}
+			if !strings.Contains(res.stderr, tt.want) {
+				t.Errorf("stderr does not contain %q, so the operator is not told what "+
+					"to change.\nstderr:\n%s", tt.want, res.stderr)
+			}
+			// The masking rule applies to the error path as well as the banner.
+			// This is not hypothetical: the flag package's own wrapper for a Set
+			// error is `invalid value %q for flag -%s`, which WOULD have printed
+			// the whole argument — which is why the flag records the rejection
+			// and reports it here instead.
+			for _, secret := range []string{"stolen-token-value", "nonsense-value", "two"} {
+				if strings.Contains(res.stderr, secret) {
+					t.Errorf("stderr echoed %q.\nstderr:\n%s", secret, res.stderr)
+				}
+			}
+			if res.stdout != "" {
+				t.Errorf("stdout = %q, want empty: a usage error is a diagnostic", res.stdout)
+			}
+		})
+	}
+}
+
+// The same property for the log level, including the one name that looks
+// plausible and is not honoured by the SDK's own logger.
+func TestUsage_AnUnusableLogLevelExitsOne(t *testing.T) {
+	for _, level := range []string{"trace", "verbose", "off", "warninG"} {
+		t.Run(level, func(t *testing.T) {
+			res := runHelperWith(t, "parse-bad-log-level", credentialEnv,
+				"HELPER_LEVEL="+level)
+			if res.code != 1 {
+				t.Errorf("-log-level %q exited %d, want 1.\nstdout:\n%s\nstderr:\n%s",
+					level, res.code, res.stdout, res.stderr)
+			}
+			for _, want := range []string{"-log-level", level, "debug", "error"} {
+				if !strings.Contains(res.stderr, want) {
+					t.Errorf("stderr does not contain %q.\nstderr:\n%s", want, res.stderr)
+				}
+			}
+			if strings.Contains(res.stderr, "missing Longbridge credentials") {
+				t.Errorf("a bad flag value must not be reported as a missing "+
+					"credential; that would exit 2 and send the operator to the "+
+					"wrong place.\nstderr:\n%s", res.stderr)
+			}
+		})
 	}
 }

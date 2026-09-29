@@ -15,6 +15,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/longbridge/openapi-go/oauth"
 	"github.com/shopspring/decimal"
 
 	appcfg "github.com/shing1211/longbridge-go-demo/internal/config"
@@ -567,11 +568,17 @@ func TestExitCode_AnUnusableFlagValueIsNotACredentialError(t *testing.T) {
 // AssertReadOnly
 // ---------------------------------------------------------------------------
 
-// readOnlyBinaries is the eight binaries that issue no writes, each with the
+// readOnlyBinaries is the nine binaries that issue no writes, each with the
 // action string its own GuardWrite refusal would print if a write were
-// attempted. The same eight (name, action) pairs are pinned against the source
+// attempted. The same nine (name, action) pairs are pinned against the source
 // in test/readonly_invariant_test.go, so a call site that drifts from this
 // table fails there rather than leaving the table testing fiction.
+//
+// auth is here because it authenticates rather than reads market data, and
+// because it is the first entry that writes anything at all: the SDK files its
+// token under $HOME when the flow completes. That file is not an API write, and
+// AssertReadOnly only asks that GuardWrite refuses, so the gate state these
+// cases drive is the whole of what it checks.
 var readOnlyBinaries = []struct{ name, action string }{
 	{"quote", "quote a symbol"},
 	{"watch", "run the watch streamer"},
@@ -581,6 +588,7 @@ var readOnlyBinaries = []struct{ name, action string }{
 	{"fundamentals", "run the fundamentals reader"},
 	{"market", "run the market reader"},
 	{"screener", "run the screener reader"},
+	{"auth", "run the OAuth login"},
 }
 
 // closedGates are the configurations in which GuardWrite refuses, i.e. every
@@ -602,7 +610,7 @@ var closedGates = []struct {
 var openGate = &appcfg.Config{Mode: appcfg.ModeLive, DryRun: false}
 
 // The invariant holds — silently — in every closed-gate configuration, and it
-// must hold for all eight binaries, not just the one the helper was written
+// must hold for all nine binaries, not just the one the helper was written
 // for. The violated branch is deliberately absent here: Fail exits, so that
 // half of the helper is pinned from a child process instead
 // (TestAssertReadOnly_OpenGateExitsOneMisconfiguration).
@@ -685,6 +693,102 @@ func TestAssertReadOnly_EdgesArePinned(t *testing.T) {
 		}()
 		_ = AssertReadOnly(nil, "market", "run the market reader")
 	})
+}
+
+// ---------------------------------------------------------------------------
+// LoadOAuth
+// ---------------------------------------------------------------------------
+
+// oauthEnv is every variable the two loaders read. Clearing them makes a
+// loader test independent of the developer's shell and of a stray .env the SDK
+// autoloads, which is the same trap internal/config's sandbox exists for.
+var oauthEnv = []string{
+	"LONGBRIDGE_APP_KEY", "LONGBRIDGE_APP_SECRET", "LONGBRIDGE_ACCESS_TOKEN",
+	"LONGPORT_APP_KEY", "LONGPORT_APP_SECRET", "LONGPORT_ACCESS_TOKEN",
+	"LONGBRIDGE_CLIENT_ID",
+	"LONGPORT_MODE", "LONGPORT_DRY_RUN", "LONGPORT_WATCHLIST_DRY_RUN",
+	"LONGPORT_DCA_DRY_RUN", "LONGPORT_ALERT_DRY_RUN",
+	"LONGPORT_SHARELIST_DRY_RUN", "LONGPORT_CONTENT_DRY_RUN",
+	"LONGBRIDGE_ENV", "LONGPORT_REGION", "LONGBRIDGE_HTTP_URL",
+	"LONGBRIDGE_QUOTE_URL", "LONGBRIDGE_TRADE_URL", "LONGBRIDGE_TIMEOUT",
+	"LONGBRIDGE_AUTH_TIMEOUT", "LONGBRIDGE_HTTP_TIMEOUT",
+}
+
+// emptyOAuthEnv clears them and puts them back afterwards. t.Setenv is not
+// enough on its own: config.LoadOAuth calls os.Setenv itself (applyEnvOverrides
+// copies between the two spellings), and those writes would outlive the test.
+func emptyOAuthEnv(t *testing.T) {
+	t.Helper()
+	type saved struct {
+		key, value string
+		set        bool
+	}
+	snap := make([]saved, 0, len(oauthEnv))
+	for _, k := range oauthEnv {
+		v, ok := os.LookupEnv(k)
+		snap = append(snap, saved{key: k, value: v, set: ok})
+		if err := os.Unsetenv(k); err != nil {
+			t.Fatalf("clearing %s: %v", k, err)
+		}
+	}
+	t.Cleanup(func() {
+		for _, s := range snap {
+			if s.set {
+				_ = os.Setenv(s.key, s.value)
+			} else {
+				_ = os.Unsetenv(s.key)
+			}
+		}
+	})
+}
+
+// The success path is the whole point of having a second loader: cmd/auth must
+// be able to reach a configuration with no app-key triple in the environment at
+// all, and the gate state it comes back with has to be the one the read-only
+// assertion is checked against.
+func TestUsage_LoadOAuthNeedsNoAppKeyCredential(t *testing.T) {
+	emptyOAuthEnv(t)
+
+	cfg := NewUsage("demo", "s").LoadOAuth(oauth.New("client-id"))
+	if cfg == nil {
+		t.Fatal("LoadOAuth returned nil without exiting")
+	}
+	if cfg.SDK == nil {
+		t.Fatal("the SDK config must be built")
+	}
+	if cfg.SDK.OAuthClient == nil {
+		t.Fatal("the SDK config must carry the OAuth client")
+	}
+	if cfg.Mode != appcfg.ModeSimulated || !cfg.DryRun {
+		t.Errorf("Mode/DryRun = %q/%v, want the simulated dry-run default, so the "+
+			"read-only assertion has a closed gate to check", cfg.Mode, cfg.DryRun)
+	}
+	if err := cfg.GuardWrite("run the OAuth login"); err == nil {
+		t.Error("GuardWrite admitted the loaded config, so AssertReadOnly would " +
+			"exit 1 on a normal run")
+	}
+}
+
+// The two loaders are not interchangeable, and the difference has to be visible
+// in what they ask for: Load demands three credentials and LoadOAuth demands
+// none, so on a machine with the triple set both succeed and only LoadOAuth
+// still works once it is gone.
+func TestUsage_LoadStillDemandsTheTripleThatLoadOAuthDoesNot(t *testing.T) {
+	emptyOAuthEnv(t)
+
+	// LoadOAuth first: with nothing in the environment at all it succeeds.
+	if cfg := NewUsage("demo", "s").LoadOAuth(oauth.New("client-id")); cfg == nil {
+		t.Fatal("LoadOAuth failed with no credentials in the environment")
+	}
+	// Load cannot be driven in-process here, because it exits. What can be
+	// asserted is the shape of the difference: its missing set is the triple.
+	_, err := appcfg.Load("")
+	var missing *appcfg.MissingCredentialError
+	if !errors.As(err, &missing) {
+		t.Fatalf("appcfg.Load(\"\") = %v, want a *MissingCredentialError", err)
+	} else if len(missing.Missing) != 3 {
+		t.Errorf("Missing = %v, want all three credentials", missing.Missing)
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -803,6 +907,19 @@ func TestUsageText_MentionsNoSwitchThatCodeIgnores(t *testing.T) {
 	// LONGPORT_MODE rather than as a variable of its own.
 	for _, name := range distinctEnvNames(got) {
 		if !strings.HasPrefix(name, "LONGPORT_") {
+			continue
+		}
+		// The extra-header prefix is a documented source that is not a safety
+		// gate, so it is not in the switch table above — and the name it is
+		// documented under is a PREFIX, so no table could enumerate it.
+		//
+		// What keeps it honest is that the usage text is generated from
+		// appcfg.HeaderEnvPrefix, the same exported constant internal/config
+		// scans the environment with: remove the reader and the constant stops
+		// existing, so the line advertising it cannot survive. Allow-listing a
+		// prefix here therefore cannot rot into a permanent exemption the way a
+		// bare name could.
+		if strings.HasPrefix(name, appcfg.HeaderEnvPrefix) {
 			continue
 		}
 		if !readByCode[name] {
@@ -991,4 +1108,170 @@ func goTraceMarkers(s string) []string {
 	}
 	sort.Strings(found)
 	return found
+}
+
+// ---------------------------------------------------------------------------
+// -header and -log-level
+// ---------------------------------------------------------------------------
+
+// clearHeaderEnv unsets every LONGPORT_HEADER_* variable for one test.
+//
+// The list above is a fixed enumeration of variable names, which cannot cover a
+// prefix-scanned source: a developer who exported LONGPORT_HEADER_X_TRACE_ID to
+// try the feature would otherwise fail the "no headers configured" cases here.
+func clearHeaderEnv(t *testing.T) {
+	t.Helper()
+	var names []string
+	for _, kv := range os.Environ() {
+		if name, _, ok := strings.Cut(kv, "="); ok && strings.HasPrefix(name, appcfg.HeaderEnvPrefix) {
+			names = append(names, name)
+		}
+	}
+	for _, n := range names {
+		name := n
+		old, wasSet := os.LookupEnv(name)
+		t.Cleanup(func() {
+			if wasSet {
+				os.Setenv(name, old)
+				return
+			}
+			os.Unsetenv(name)
+		})
+		if err := os.Unsetenv(name); err != nil {
+			t.Fatalf("clearing %s: %v", name, err)
+		}
+	}
+}
+
+// The flag reaches the SDK, and it is repeatable. Both matter: a single-use flag
+// would force a comma-separated value with its own escaping rules, and a flag
+// that stopped at the Config without reaching the SDK config would be decoration.
+//
+// The credentials are set here rather than skipped because Load is the thing
+// under test and it will not return without them. Nothing in this path opens a
+// connection: Load only builds a configuration.
+func TestUsage_HeaderFlagIsRepeatableAndReachesTheSDKConfig(t *testing.T) {
+	clearHeaderEnv(t)
+	t.Setenv("LONGBRIDGE_APP_KEY", "key-1")
+	t.Setenv("LONGBRIDGE_APP_SECRET", "secret-1")
+	t.Setenv("LONGBRIDGE_ACCESS_TOKEN", "token-1")
+
+	u := NewUsage("demo", "s")
+	u.Parse([]string{"-header", "x-trace-id=abc123", "-header", "x-tenant=demo"})
+	cfg := u.Load()
+
+	want := map[string]string{"x-trace-id": "abc123", "x-tenant": "demo"}
+	if len(cfg.SDK.ExtraHeaders) != len(want) {
+		t.Fatalf("SDK.ExtraHeaders = %v, want %v; every -header has to survive to the "+
+			"SDK's own map, which is what its request loop iterates", cfg.SDK.ExtraHeaders, want)
+	}
+	for k, v := range want {
+		if cfg.SDK.ExtraHeaders[k] != v {
+			t.Errorf("SDK.ExtraHeaders[%q] = %q, want %q", k, cfg.SDK.ExtraHeaders[k], v)
+		}
+	}
+	if len(cfg.Headers) != len(want) {
+		t.Errorf("Config.Headers = %+v, want %d entries", cfg.Headers, len(want))
+	}
+}
+
+// The last spelling of a name wins, and a spelling that differs only in case is
+// the same name — the two rules together are what stop the SDK's map iteration
+// from choosing the winner.
+func TestUsage_HeaderFlagFoldsSpellingsAndTakesTheLast(t *testing.T) {
+	clearHeaderEnv(t)
+	t.Setenv("LONGBRIDGE_APP_KEY", "key-1")
+	t.Setenv("LONGBRIDGE_APP_SECRET", "secret-1")
+	t.Setenv("LONGBRIDGE_ACCESS_TOKEN", "token-1")
+
+	u := NewUsage("demo", "s")
+	u.Parse([]string{"-header", "x-a=first", "-header", "X-A=second"})
+	cfg := u.Load()
+
+	if len(cfg.SDK.ExtraHeaders) != 1 {
+		t.Fatalf("SDK.ExtraHeaders = %v, want exactly one entry", cfg.SDK.ExtraHeaders)
+	}
+	if got := cfg.SDK.ExtraHeaders["x-a"]; got != "second" {
+		t.Errorf("x-a = %q, want %q", got, "second")
+	}
+}
+
+// -log-level is what installs the adapter, and leaving it off installs nothing.
+func TestUsage_LogLevelFlagInstallsTheAdapterAndItsAbsenceDoesNot(t *testing.T) {
+	clearHeaderEnv(t)
+	t.Setenv("LONGBRIDGE_APP_KEY", "key-1")
+	t.Setenv("LONGBRIDGE_APP_SECRET", "secret-1")
+	t.Setenv("LONGBRIDGE_ACCESS_TOKEN", "token-1")
+
+	quiet := NewUsage("demo", "s")
+	quiet.Parse(nil)
+	if cfg := quiet.Load(); cfg.Logger != nil {
+		t.Errorf("no -log-level installed %v; the flag is what turns this on", cfg.Logger)
+	}
+
+	loud := NewUsage("demo", "s")
+	loud.Parse([]string{"-log-level", "debug"})
+	cfg := loud.Load()
+	if cfg.Logger == nil {
+		t.Fatal("-log-level debug installed no adapter")
+	}
+	if got := cfg.Logger.LevelName(); got != "debug" {
+		t.Errorf("level = %s, want debug", got)
+	}
+	if cfg.SDK.Logger() == nil {
+		t.Error("the adapter was not handed to the SDK config, so the SDK's own " +
+			"logging would not be routed through it")
+	}
+}
+
+// The -h block has to teach the whole rule, because a reader who cannot see that
+// the credential headers are reserved will try them and lose a credential.
+func TestUsageText_DocumentsTheHeaderAndLogLevelFlags(t *testing.T) {
+	got := usageText(t, "demo", "s")
+	for _, want := range []string{
+		"-header",              // the flag itself
+		"NAME=VALUE",           // its shape
+		"repeatable",           // that it may be given more than once
+		"-log-level",           // the other new flag
+		"debug",                // with a level it accepts
+		"stderr",               // and where the output goes
+		appcfg.HeaderEnvPrefix, // the environment source, spelled from the constant
+		"config.yaml",          // the file source
+		"precedence",           // and the order of the three
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("usage text does not contain %q.\nfull text:\n%s", want, got)
+		}
+	}
+	// Every reserved name is listed, so the refusal is never a surprise.
+	for _, name := range appcfg.ReservedHeaderNames() {
+		if !strings.Contains(got, name) {
+			t.Errorf("usage text does not name the reserved header %q.\nfull text:\n%s",
+				name, got)
+		}
+	}
+	// And the consequence is stated, not just the list.
+	if !strings.Contains(got, "REPLACE the credential") {
+		t.Errorf("usage text lists the reserved headers without saying what happens if "+
+			"one is set.\nfull text:\n%s", got)
+	}
+}
+
+// The flag's own help string is what a reader sees in the flags block, so the
+// reserved names have to be reachable from there too rather than only from the
+// block printed underneath.
+func TestUsageText_HeaderFlagHelpMentionsRepeatableAndReserved(t *testing.T) {
+	got := usageText(t, "demo", "s")
+	start := strings.Index(got, "-header")
+	if start < 0 {
+		t.Fatal("no -header flag in the usage text")
+	}
+	window := got[start:min(start+400, len(got))]
+	if !strings.Contains(window, "repeatable") {
+		t.Errorf("the -header help does not say it is repeatable:\n%s", window)
+	}
+	if !strings.Contains(window, "credential") {
+		t.Errorf("the -header help does not warn that the credential headers are "+
+			"refused:\n%s", window)
+	}
 }

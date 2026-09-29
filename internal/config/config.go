@@ -22,6 +22,7 @@ import (
 	"time"
 
 	sdk "github.com/longbridge/openapi-go/config"
+	"github.com/longbridge/openapi-go/oauth"
 )
 
 // Mode selects which Longbridge environment the credentials belong to.
@@ -52,6 +53,11 @@ type Config struct {
 	// SDK is the official SDK config, ready for quote/trade/market NewFromCfg.
 	SDK *sdk.Config
 
+	// AppKey, AppSecret and AccessToken are empty in a Config from LoadOAuth
+	// except for the app key, which that loader carries for the startup banner
+	// alone: it authenticates by OAuth client ID, and the SDK's own check()
+	// returns early when OAuthClient is set. Nothing may treat the empty
+	// secret or token there as a missing credential. See LoadOAuth.
 	AppKey      string
 	AppSecret   string
 	AccessToken string
@@ -60,6 +66,18 @@ type Config struct {
 	Mode Mode
 	// DryRun blocks all order writes when true. Defaults to true.
 	DryRun bool
+
+	// Headers are the extra HTTP headers applied to every request the SDK makes,
+	// in the order they were resolved (file, then environment, then flag) and
+	// sorted by name. Empty when none were configured, which is the usual case.
+	// See header.go for the sources and the precedence between them.
+	Headers []Header
+
+	// Logger is the adapter handed to the SDK when the SDK log-level flag was
+	// passed, and nil when it was not. A nil here means the SDK is still using
+	// the logger it installs for itself, which writes to stderr and prints
+	// error, warn and info with nothing set — see installLogger.
+	Logger *SDKLogger
 
 	// Source describes where credentials came from, for logging.
 	Source string
@@ -142,6 +160,150 @@ func EnvDocLines() []string {
 	return lines
 }
 
+// Option is one caller-supplied setting that neither the environment nor a YAML
+// file can express on its own — currently the extra HTTP headers and the SDK log
+// level, both of which arrive from the shared command-line flag set.
+//
+// It is a variadic parameter on Load rather than a field of the callers, so that
+// a command gets these by calling Load and there is no second way to load a
+// configuration that has them.
+type Option func(*loadOptions)
+
+// loadOptions is the resolved set of caller-supplied settings. Kept unexported
+// so a new one cannot be conjured by a command; it arrives through Option and
+// nothing else.
+type loadOptions struct {
+	// headers are raw `-header NAME=VALUE` arguments, in the order given. They
+	// are parsed and validated inside Load rather than at the flag layer, so
+	// that the environment and file sources go through exactly the same rules.
+	headers []string
+	// logLevel is the SDK log level, or "" for "not requested".
+	logLevel string
+}
+
+// WithHeaders supplies extra HTTP headers as `NAME=VALUE` arguments, one per
+// header. It is the flag side of the same set that LONGPORT_HEADER_<NAME> and
+// the YAML `headers:` block contribute to, and it has the highest precedence of
+// the three.
+//
+// The arguments are validated here rather than where the flag is declared, on
+// purpose: a rule that only the command line went through would be a rule with
+// a hole in it, and the hole is exactly the interesting part — the credential
+// headers. See ParseHeaderSpec and header.go.
+func WithHeaders(specs ...string) Option {
+	return func(o *loadOptions) { o.headers = append(o.headers, specs...) }
+}
+
+// WithLogLevel asks for the SDK's own logging to be routed to standard error
+// through this package's adapter, at the named level. An empty name — the
+// default, and what leaving the flag off means — changes nothing at all, so a
+// run that did not ask for logs does not get this package's logger.
+func WithLogLevel(name string) Option {
+	return func(o *loadOptions) { o.logLevel = name }
+}
+
+// loadHeaders resolves the three header sources into the set to apply, in
+// precedence order: the YAML file first, then the environment, then the flag.
+//
+// It is called after the credentials and the switches have been checked, which
+// is where every other "this value cannot be used" error in this package is
+// raised. A malformed header therefore reports itself as a plain error, exactly
+// like a malformed LONGPORT_MODE, and never as a missing credential.
+func loadHeaders(lo loadOptions, fileHeaders []Header) ([]Header, error) {
+	envHeaders, err := headersFromEnv()
+	if err != nil {
+		return nil, err
+	}
+	var flagHeaders []Header
+	for _, spec := range lo.headers {
+		h, err := ParseHeaderSpec("-header", spec)
+		if err != nil {
+			return nil, err
+		}
+		flagHeaders = append(flagHeaders, h)
+	}
+	return resolveHeaders(fileHeaders, envHeaders, flagHeaders), nil
+}
+
+// applyHeaders installs the resolved set on the built SDK config.
+//
+// This is the only place the SDK's Config.WithHeader is called, which is the
+// point: the extra-header feature has to exist for every command that loads a
+// configuration, and the only way to guarantee that is to make it part of
+// loading one. A per-command call would be sixteen chances to forget and would
+// put the reserved-name check behind whatever the command felt like doing.
+//
+// VERIFIED in openapi-go v0.25.2 config/config.go: WithHeader lazily creates
+// ExtraHeaders and stores the pair, so a run that passed no headers leaves the
+// field nil and the SDK's own request loop skips the extra-header loop entirely.
+func applyHeaders(sdkCfg *sdk.Config, headers []Header) {
+	for _, h := range headers {
+		sdkCfg.WithHeader(h.Key, h.Value)
+	}
+}
+
+// installLogger routes the SDK's logging to standard error, but only if the
+// operator asked for it.
+//
+// # Config.SetLogger IS PROCESS-WIDE, NOT PER-CONFIGURATION
+//
+// openapi-go v0.25.2 config/config.go, SetLogger, does two things:
+//
+//	func (c *Config) SetLogger(l log.Logger) {
+//	    if l != nil {
+//	        l.SetLevel(c.LogLevel)
+//	        c.logger = l
+//	        log.SetLogger(l)      // <- the package-global default
+//	    }
+//	}
+//
+// The second line replaces openapi-go/log's package-level defaultLogger, which
+// is the logger every other part of the library reaches through the log.Info /
+// log.Debug helpers — including the websocket protocol layer in
+// quote/core.go and trade/core.go, which log from their read loops. So calling
+// SetLogger on one *sdk.Config changes how the WHOLE process logs, and any
+// other configuration in the same process now shares this logger and its
+// threshold. Nothing in this repo builds a second configuration, so the hazard
+// is contained, but it is the reason the call lives in one place behind one
+// flag rather than being available to every command to sprinkle around.
+//
+// # WHY AN UNSET FLAG CALLS NOTHING AT ALL
+//
+// Leaving the SDK's own DefaultLogger in place is not a fallback, it is the
+// better default: it writes through the standard library log package, which is
+// stderr, and it needs no configuration to be correct.
+//
+// It is worth knowing what "no level set" means there, because it is not quiet.
+// MEASURED with fake credentials and no request: the library filters with
+// `severity >= threshold` and starts at threshold zero, which is *below* info —
+// so with nothing set it prints error, warn and info and suppresses only debug.
+// A -log-level of warn or error is therefore quieter than passing no flag at
+// all, which is the intended effect rather than a surprise.
+//
+// Installing an adapter that behaved identically would change the output format
+// of every run in the repo for no gain.
+//
+// The flag beats LONGBRIDGE_LOG_LEVEL, and the reason it takes a second
+// SetLevel call is that SetLogger applies the SDK's own resolved value first —
+// an explicit request on the command line should not be undone by a variable
+// that was left in a .env from another session.
+func installLogger(sdkCfg *sdk.Config, name string) (*SDKLogger, error) {
+	if strings.TrimSpace(name) == "" {
+		return nil, nil
+	}
+	// Re-validated here even though the flag layer validates it too: Load is a
+	// package API, and the SDK must never be handed a level this package has not
+	// checked.
+	level, err := ParseLogLevel(name)
+	if err != nil {
+		return nil, err
+	}
+	logger := NewSDKLogger(stderrLogger, level)
+	sdkCfg.SetLogger(logger)
+	logger.SetLevel(name)
+	return logger, nil
+}
+
 // Load reads configuration and validates it.
 //
 // Precedence for each credential: env var, then YAML file (if one is found).
@@ -150,9 +312,19 @@ func EnvDocLines() []string {
 // An explicit file argument must name a .yaml file: this loader parses YAML
 // only, and the SDK's own TOML reader is not wired up here.
 //
+// The extra headers and the SDK log level are caller-supplied through Option.
+// They are resolved, validated and applied here rather than by each command, so
+// that a command cannot forget them and so that the reserved-name and masking
+// rules apply identically whatever the source was.
+//
 // It returns a *MissingCredentialError listing every absent credential, or a
 // plain error describing a bad value. It never panics and never returns nil.
-func Load(file string) (*Config, error) {
+func Load(file string, extra ...Option) (*Config, error) {
+	lo := loadOptions{}
+	for _, opt := range extra {
+		opt(&lo)
+	}
+
 	vals := make(map[string]string, len(credSpecs)) // yamlKey -> value
 
 	// Pass 1: env wins.
@@ -162,8 +334,11 @@ func Load(file string) (*Config, error) {
 		}
 	}
 
-	// Pass 2: fill gaps from a YAML file.
-	usedFile, err := loadFileInto(vals, file)
+	// Pass 2: fill gaps from a YAML file. The file's `headers:` block is
+	// collected at the same time, because it is the same read of the same file
+	// and a second parse would exist only to avoid widening this signature.
+	var fileHeaders []Header
+	usedFile, err := loadFileInto(vals, &fileHeaders, file)
 	if err != nil {
 		return nil, err
 	}
@@ -193,28 +368,39 @@ func Load(file string) (*Config, error) {
 	if err := ValidateWatchlistDryRun(); err != nil {
 		return nil, err
 	}
-	// And for every reusable write guard (dca, alert, sharelist, content).
+	// And for the reusable write guard (dca, alert, sharelist, content).
 	// declaredGuards() is the single list, so a new gate is added in one place.
 	if err := ValidateAllDryRunEnvs(declaredGuards()...); err != nil {
 		return nil, err
 	}
+	// And for the headers, which have their own reserved names and their own
+	// masking rules, from whichever of the three sources supplied them.
+	headers, err := loadHeaders(lo, fileHeaders)
+	if err != nil {
+		return nil, err
+	}
 
-	opts := []sdk.Option{}
+	sdkOpts := []sdk.Option{}
 	if usedFile != "" {
-		opts = append(opts, sdk.WithFilePath(usedFile))
+		sdkOpts = append(sdkOpts, sdk.WithFilePath(usedFile))
 	}
 	// WithConfigKey is applied last so it overrides anything the file supplied,
 	// which matches the "env wins" precedence above.
-	opts = append(opts, sdk.WithConfigKey(
+	sdkOpts = append(sdkOpts, sdk.WithConfigKey(
 		vals["app_key"], vals["app_secret"], vals["access_token"],
 	))
 
 	// Remaining tunables are env-only; the SDK has no struct field setters.
 	applyEnvOverrides()
 
-	sdkCfg, err := sdk.New(opts...)
+	sdkCfg, err := sdk.New(sdkOpts...)
 	if err != nil {
 		return nil, fmt.Errorf("building SDK config: %w", err)
+	}
+	applyHeaders(sdkCfg, headers)
+	logger, err := installLogger(sdkCfg, lo.logLevel)
+	if err != nil {
+		return nil, err
 	}
 
 	return &Config{
@@ -224,7 +410,107 @@ func Load(file string) (*Config, error) {
 		AccessToken: vals["access_token"],
 		Mode:        mode,
 		DryRun:      dryRun,
+		Headers:     headers,
+		Logger:      logger,
 		Source:      usedFile,
+	}, nil
+}
+
+// LoadOAuth builds the demo configuration for a command that authenticates
+// with OAuth 2.0 instead of the app-key triple, which is what cmd/auth needs.
+//
+// It is Load with one requirement removed, not a second opinion about the
+// same one. Load demands all three credentials because every other binary
+// signs its requests with them; the OAuth flow is authorised by the OAuth
+// client ID alone, and the SDK's own config check returns early when
+// OAuthClient is set (VERIFIED in openapi-go v0.25.2 config/config.go, check():
+// `if c.OAuthClient != nil { return nil }`). Requiring the triple here would
+// mean an operator could not obtain a token before creating an app-key
+// credential, which is the opposite of the intended order.
+//
+// Everything else is deliberately identical to Load, so a command that
+// authenticates this way still sees the same mode, the same dry-run state and
+// the same startup banner as the rest of the repo — which is what lets it
+// assert the read-only invariant against a genuinely loaded configuration
+// rather than a hand-built stand-in. That includes validating the dry-run
+// switches this command will never use: they are validated at startup by
+// every binary, so that a bad value fails immediately instead of minutes later
+// in an unrelated command.
+//
+// What is NOT loaded, and why:
+//   - the app secret and the access token. Neither exists on the OAuth path;
+//     asking for them here would report a missing credential that is not one.
+//   - the client ID. It is not one of the SDK's YAML fields, so there is
+//     nowhere in config.yaml to read it from; cmd/auth resolves it from the
+//     flag and the environment instead.
+//
+// AppKey is still carried, purely so the banner reads the same as it does
+// for every other command rather than reporting <unset> for a key the
+// operator has in fact set. It signs nothing here: cmd/auth falls back to the
+// app key as a source for the OAuth client ID, which is a different value
+// wearing the same name.
+func LoadOAuth(o *oauth.OAuth, file string, extra ...Option) (*Config, error) {
+	// Named opt rather than o in the loop below: o is the OAuth client, and a
+	// loop variable that shadows the parameter a reader came here for is a trap
+	// in a function that takes three of them.
+	lo := loadOptions{}
+	for _, opt := range extra {
+		opt(&lo)
+	}
+	vals := map[string]string{
+		"app_key": lookupEnv([]string{"LONGBRIDGE_APP_KEY", "LONGPORT_APP_KEY"}),
+	}
+	// Same precedence as Load — env first, then the YAML file — so a key that
+	// only exists in config.yaml still shows up in the banner.
+	var fileHeaders []Header
+	usedFile, err := loadFileInto(vals, &fileHeaders, file)
+	if err != nil {
+		return nil, err
+	}
+
+	mode, dryRun, err := loadModeAndDryRun()
+	if err != nil {
+		return nil, err
+	}
+	if err := ValidateWatchlistDryRun(); err != nil {
+		return nil, err
+	}
+	if err := ValidateAllDryRunEnvs(declaredGuards()...); err != nil {
+		return nil, err
+	}
+	// Headers and the SDK log level are resolved here exactly as in Load, and
+	// for the same reason: an OAuth login is still a program that talks to the
+	// API, and the reserved-name rule must not depend on how the command
+	// authenticated.
+	headers, err := loadHeaders(lo, fileHeaders)
+	if err != nil {
+		return nil, err
+	}
+
+	opts := []sdk.Option{sdk.WithOAuthClient(o)}
+	if usedFile != "" {
+		opts = append(opts, sdk.WithFilePath(usedFile))
+	}
+	applyEnvOverrides()
+
+	sdkCfg, err := sdk.New(opts...)
+	if err != nil {
+		return nil, fmt.Errorf("building SDK config: %w", err)
+	}
+	applyHeaders(sdkCfg, headers)
+	logger, err := installLogger(sdkCfg, lo.logLevel)
+	if err != nil {
+		return nil, err
+	}
+
+	return &Config{
+		SDK:     sdkCfg,
+		AppKey:  vals["app_key"],
+		Mode:    mode,
+		DryRun:  dryRun,
+		Headers: headers,
+		Logger:  logger,
+		Source:  usedFile,
 	}, nil
 }
 
@@ -267,16 +553,36 @@ func effectiveEndpoints(c *sdk.Config) (httpURL, quoteURL, tradeURL string) {
 // String renders a log-safe summary. It never includes the app secret or the
 // access token, not even redacted, because they are pure credentials with no
 // diagnostic value.
+//
+// It does report the extra headers, because a header nobody expected is the
+// first thing worth knowing when a request behaves oddly, and because a header
+// that is going out on every request deserves to be visible in the one line
+// every command prints before it does anything. Each one goes through
+// RedactHeaderValue, so a name that looks credential-bearing is shown masked
+// and any other name is shown in full; see that function for the exact rule.
 func (c *Config) String() string {
 	mode := string(c.Mode)
 	if c.Mode == ModeSimulated {
 		mode += "  (expected: credentials from a SIMULATED account)"
 	}
 	httpURL, quoteURL, tradeURL := effectiveEndpoints(c.SDK)
-	return fmt.Sprintf(
+	var b strings.Builder
+	fmt.Fprintf(&b,
 		"mode=%s dry_run=%v app_key=%s http=%s quote_ws=%s trade_ws=%s",
-		mode, c.DryRun, Redact(c.AppKey), httpURL, quoteURL, tradeURL,
-	)
+		mode, c.DryRun, Redact(c.AppKey), httpURL, quoteURL, tradeURL)
+	for _, h := range c.Headers {
+		fmt.Fprintf(&b, " header[%s]=%s", h.Key, RedactHeaderValue(h.Key, h.Value))
+		if h.Origin != "" {
+			fmt.Fprintf(&b, "(from %s)", h.Origin)
+		}
+	}
+	// Only when one was installed: the SDK's own logger is in place otherwise,
+	// and saying "sdk_log=error" for a logger this package did not install
+	// would be claiming something about behaviour it does not control.
+	if c.Logger != nil {
+		fmt.Fprintf(&b, " sdk_log=%s", c.Logger.LevelName())
+	}
+	return b.String()
 }
 
 // LoadModeAndDryRun exposes the safety switches for commands that parse flags
