@@ -46,6 +46,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/longbridge/openapi-go/sharelist"
 
@@ -83,7 +84,8 @@ func main() {
 	u.FS.StringVar(&listDescription, "description", "",
 		"sharelist description for -action create (defaults to the name, as the SDK does)")
 	u.FS.StringVar(&symbols, "symbols", "",
-		"comma-separated CODE.MARKET symbols for -action add, remove and sort")
+		"comma-separated CODE.MARKET symbols for -action add, remove and sort; "+
+			"each must be a non-empty code, one dot, and a non-empty market, with no spaces (e.g. 700.HK)")
 	u.FS.BoolVar(&confirmLive, "confirm-live-sharelist", false,
 		"REQUIRED acknowledgement for any sharelist write; must be combined with "+
 			"LONGPORT_SHARELIST_DRY_RUN=0 and LONGPORT_MODE=live")
@@ -347,10 +349,8 @@ func doSecurities(ctx context.Context, cfg *appcfg.Config,
 		return fmt.Errorf("-symbols is required for -action %s (CODE.MARKET, e.g. 700.HK)", mode)
 	}
 	for _, s := range syms {
-		if !strings.Contains(s, ".") {
-			return fmt.Errorf(
-				"symbol %q is not in CODE.MARKET form (e.g. 700.HK, TSLA.US); "+
-					"the SDK converts it to a counter_id and a bare code would be rejected", s)
+		if err := checkSymbolShape(s); err != nil {
+			return err
 		}
 	}
 
@@ -422,6 +422,49 @@ func gate(cfg *appcfg.Config, desc string) error {
 				"of unsatisfied conditions. To perform it:\n"+
 				"  %s=0  +  %s  +  LONGPORT_MODE=live",
 			desc, appcfg.SharelistGuard.DryRunEnv, appcfg.SharelistGuard.ConfirmFlag)
+	}
+	return nil
+}
+
+// checkSymbolShape refuses a -symbols entry that is not exactly CODE.MARKET,
+// with the code before the dot, the market after it, and no whitespace inside.
+//
+// The check exists because the SDK does no validation of its own: it splits the
+// entry on the LAST dot and builds a counter_id from whatever is left, so a
+// malformed entry is not caught here, it is sent, and the API then rejects the
+// whole request with a message that names neither the flag nor the entry. Each
+// error therefore says which part of the entry is wrong rather than reporting
+// every rejection as "not in CODE.MARKET form" — ".HK" is not a mystery, it is
+// a missing code.
+//
+// splitList has already trimmed the entry, so padding around it is not this
+// function's business; only whitespace inside one is refused.
+func checkSymbolShape(s string) error {
+	const form = "CODE.MARKET, e.g. 700.HK or TSLA.US"
+
+	if strings.IndexFunc(s, unicode.IsSpace) >= 0 {
+		return fmt.Errorf("symbol %q contains whitespace: the SDK keeps it inside the "+
+			"counter_id it builds, so the request can never match an instrument; want %s "+
+			"with no spaces", s, form)
+	}
+	if !strings.Contains(s, ".") {
+		return fmt.Errorf(
+			"symbol %q is not in CODE.MARKET form (e.g. 700.HK, TSLA.US); "+
+				"the SDK converts it to a counter_id and a bare code would be rejected", s)
+	}
+	if n := strings.Count(s, "."); n > 1 {
+		return fmt.Errorf("symbol %q has %d dots: the SDK splits on the last one to build the "+
+			"counter_id, so the market and the code are not the two halves you typed; want %s",
+			s, n, form)
+	}
+	code, market, _ := strings.Cut(s, ".")
+	if code == "" {
+		return fmt.Errorf("symbol %q has an empty code before the dot: the SDK would build a "+
+			"counter_id with no instrument code, which nothing can match; want %s", s, form)
+	}
+	if market == "" {
+		return fmt.Errorf("symbol %q has an empty market after the dot: the SDK would build a "+
+			"counter_id with no market, which the API cannot resolve; want %s", s, form)
 	}
 	return nil
 }
