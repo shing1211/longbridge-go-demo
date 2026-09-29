@@ -247,6 +247,13 @@ func printOrders(orders []*trade.Order) {
 // If you add a new write operation, copy this shape verbatim.
 
 func doSubmit(ctx context.Context, cfg *appcfg.Config, connect func() (*trade.TradeContext, error)) error {
+	// Trimmed before the check, not after: a flag that is present but blank is a
+	// flag the user got wrong, and it has to be reported as one. Comparing
+	// symbol == "" instead left `-symbol "   "` to reach the gate, which refused
+	// it with a message about the three switches — naming none of the flag the
+	// user actually got wrong. cmd/content and cmd/sharelist trim the same way,
+	// as do the enum parsers in this file.
+	symbol = strings.TrimSpace(symbol)
 	if symbol == "" {
 		return fmt.Errorf("-symbol is required for -action submit")
 	}
@@ -265,12 +272,9 @@ func doSubmit(ctx context.Context, cfg *appcfg.Config, connect func() (*trade.Tr
 	if err != nil {
 		return err
 	}
-	px := decimal.Zero
-	if price != "" {
-		px, err = decimal.NewFromString(price)
-		if err != nil {
-			return fmt.Errorf("parsing -price %q: %w", price, err)
-		}
+	px, err := priceOrZero(price)
+	if err != nil {
+		return err
 	}
 
 	order := &trade.SubmitOrder{
@@ -316,19 +320,16 @@ func doSubmit(ctx context.Context, cfg *appcfg.Config, connect func() (*trade.Tr
 }
 
 func doReplace(ctx context.Context, cfg *appcfg.Config, connect func() (*trade.TradeContext, error)) error {
+	orderID = strings.TrimSpace(orderID)
 	if orderID == "" {
 		return fmt.Errorf("-order-id is required for -action replace")
 	}
 	if quantity == 0 {
 		return fmt.Errorf("-qty must be greater than 0 for -action replace")
 	}
-	px := decimal.Zero
-	if price != "" {
-		var err error
-		px, err = decimal.NewFromString(price)
-		if err != nil {
-			return fmt.Errorf("parsing -price %q: %w", price, err)
-		}
+	px, err := priceOrZero(price)
+	if err != nil {
+		return err
 	}
 
 	replace := &trade.ReplaceOrder{
@@ -365,6 +366,7 @@ func doReplace(ctx context.Context, cfg *appcfg.Config, connect func() (*trade.T
 }
 
 func doCancel(ctx context.Context, cfg *appcfg.Config, connect func() (*trade.TradeContext, error)) error {
+	orderID = strings.TrimSpace(orderID)
 	if orderID == "" {
 		return fmt.Errorf("-order-id is required for -action cancel")
 	}
@@ -482,6 +484,31 @@ func parseTimeInForce(s string) (trade.TimeType, error) {
 	return "", fmt.Errorf("unknown -tif %q: want Day, GTC or GTD", s)
 }
 
+// priceOrZero parses the optional -price shared by submit and replace. Trimming
+// is normalisation, matching the enum parsers in this file: `-price " 500 "`
+// is a number someone typed with a sloppy space, and refusing it would be the
+// same mistake as refusing `-side buy`.
+//
+// A flag that is present but blank is NOT an omission, though. Treating it as
+// one would turn `-price "   "` into decimal.Zero — a zero limit price — so it
+// is refused by name instead. The empty string is the only way to ask for no
+// price at all.
+func priceOrZero(s string) (decimal.Decimal, error) {
+	if s == "" {
+		return decimal.Zero, nil
+	}
+	trimmed := strings.TrimSpace(s)
+	if trimmed == "" {
+		return decimal.Zero, fmt.Errorf(
+			"-price is only whitespace: pass a decimal amount, or leave the flag out entirely")
+	}
+	d, err := decimal.NewFromString(trimmed)
+	if err != nil {
+		return decimal.Zero, fmt.Errorf("parsing -price %q: %w", s, err)
+	}
+	return d, nil
+}
+
 func dec(d *decimal.Decimal) string {
 	if d == nil {
 		return "-"
@@ -489,9 +516,17 @@ func dec(d *decimal.Decimal) string {
 	return d.StringFixed(2)
 }
 
+// truncate shortens s to at most n bytes, marking the cut with an ellipsis so a
+// clipped cell is never mistaken for a whole one. n <= 1 has no room for both a
+// character and the ellipsis, so the ellipsis wins: an empty cell would read as
+// "no name", which is a different statement. This matches cli.Truncate in
+// internal/cli, which guards the same boundary for the other binaries.
 func truncate(s string, n int) string {
-	if len(s) <= n {
+	if s == "" || len(s) <= n {
 		return s
+	}
+	if n <= 1 {
+		return "…"
 	}
 	return s[:n-1] + "…"
 }
