@@ -6,7 +6,8 @@
 //
 // It is entirely READ-ONLY. Every method it calls is a GET (or, for
 // TopMovers, a POST that only queries) and none of them mutate server-side
-// state, so there is no gate to trip here.
+// state, so no gate is ever consulted here — and at startup it asserts that
+// the order gate would refuse it anyway.
 package main
 
 import (
@@ -89,6 +90,10 @@ func main() {
 	cfg := u.Load()
 	timeout = appcfg.Timeout()
 	fmt.Fprintf(os.Stderr, "[config] %s\n", cfg)
+	// SAFETY: read-only binary. If the order gate were open, stop.
+	if err := cfg.GuardWrite("run the market reader"); err == nil {
+		cli.Fail(fmt.Errorf("internal invariant violated: market is read-only but the order gate is open"))
+	}
 
 	wanted := map[string]bool{}
 	for _, s := range strings.Split(sections, ",") {
@@ -381,7 +386,7 @@ func printBrokerHolding(ctx context.Context, mc *market.MarketContext) error {
 	c, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	cli.Section(fmt.Sprintf("Broker holding %s (rct_%d)", brokerSym, int(period)))
+	cli.Section(fmt.Sprintf("Broker holding %s (%s)", brokerSym, brokerPeriodAPIParam(period)))
 	res, err := mc.BrokerHolding(c, brokerSym, period)
 	if err != nil {
 		return fmt.Errorf("broker holding for %s: %w", brokerSym, err)
@@ -692,6 +697,27 @@ func parseBrokerPeriod(s string) (market.BrokerHoldingPeriod, error) {
 		}
 	}
 	return 0, fmt.Errorf("unknown -broker-period %q: want 1, 5, 20 or 60", s)
+}
+
+// brokerPeriodAPIParam renders a BrokerHoldingPeriod as the API's type
+// parameter. The SDK does this itself for the request, but in an unexported
+// method (BrokerHoldingPeriod.toAPIString), and the enum is a 0-based iota, so
+// formatting the constant directly as "rct_%d" prints the enum index rather
+// than the window the user asked for. Mapped by switch, never by formula.
+func brokerPeriodAPIParam(p market.BrokerHoldingPeriod) string {
+	switch p {
+	case market.BrokerHoldingPeriodRct1:
+		return "rct_1"
+	case market.BrokerHoldingPeriodRct5:
+		return "rct_5"
+	case market.BrokerHoldingPeriodRct20:
+		return "rct_20"
+	case market.BrokerHoldingPeriodRct60:
+		return "rct_60"
+	}
+	// Unreachable from parseBrokerPeriod; shown rather than hidden so a
+	// future SDK constant cannot be printed as a plausible-looking window.
+	return "unknown(" + strconv.Itoa(int(p)) + ")"
 }
 
 // parseMoverSort maps the CLI word to the SDK's raw uint32 sort code. TopMovers
