@@ -8,14 +8,11 @@ Fifteen commands, one shared config loader, and a hard rule that no order can be
 sent unless you say so three different ways.
 
 **SDK coverage: every exported method on all twelve context types is exercised
-somewhere in `cmd/` — 153 of 153.** See [Coverage](#sdk-coverage) for the one
-command that verifies this, and for the caveat that it is a static check.
-
-The counts, in full, are: 47 on `QuoteContext`, 32 on `FundamentalContext`, 19
-on `TradeContext`, 12 on `MarketContext`, 11 on `DCAContext`, 8 on
-`SharelistContext`, 7 on `ContentContext`, and 5 each on `ScreenerContext` and
-`PortfolioContext`, plus 4 on `AlertContext`, 2 on `AssetContext` and 1 on
-`CalendarContext`.
+somewhere in `cmd/` — 153 of 153**, and `make coverage-check` fails the build if
+that stops being true. The normative statement is
+[`openspec/specs/sdk-coverage/`](openspec/specs/sdk-coverage/spec.md); see
+[SDK coverage](#sdk-coverage) for the command that verifies it, the per-context
+counts, and the caveat that it is a static check.
 
 > **Status: not yet tested against the live API.** See
 > [Honest status](#honest-status). Everything below was verified by building,
@@ -38,6 +35,7 @@ on `TradeContext`, 12 on `MarketContext`, 11 on `DCAContext`, 8 on
 - [SDK coverage](#sdk-coverage)
 - [Honest status](#honest-status)
 - [Development](#development)
+- [Specification layer](#specification-layer)
 - [Troubleshooting](#troubleshooting)
 - [Project layout](#project-layout)
 
@@ -50,6 +48,7 @@ git clone <this-repo> longbridge-go-demo
 cd longbridge-go-demo
 
 # 1. Build everything and check it compiles cleanly.
+make verify       # fmt-check + vet + test -race + build + coverage-check
 make all          # fmt + vet + build into ./bin
 make fmt-check    # gofmt must report nothing
 
@@ -236,7 +235,12 @@ add a new write operation, copy the existing `gate(...)` shape.
 
 ### The mode test is fail-closed
 
-Condition 3 above is implemented as `if c.Mode != ModeLive { refuse }`, not as
+The rule itself — that every gate denies by default, and that the demo's own
+loader is a second line of defence rather than the one — is in
+[`openspec/specs/write-gates/`](openspec/specs/write-gates/spec.md). What is
+worth keeping here is the evidence for one specific choice.
+
+`LONGPORT_MODE` is tested as `if c.Mode != ModeLive { refuse }`, not as
 `if c.Mode == ModeSimulated { refuse }`. The distinction matters:
 
 | Written as | An empty, mistyped or invented `Mode` |
@@ -253,12 +257,10 @@ money is still a hole, so the deny-by-default form wins. `TestGuardWrite_Unknown
 and `TestWriteGuard_UnsatisfiedAlreadyDeniesUnknownModes` pin it, and the
 doc comment on `GuardWrite` says not to "simplify" it back.
 
-Two smaller fail-closed rules follow the same principle. A `WriteGuard`'s
-`DryRun()` treats an **unset** variable and an **unparseable** one identically —
-both mean "still in dry run" — because guessing the other way is the dangerous
-default. And `strconv.ParseBool` is used rather than a truthiness test, so only
-an exact `0`/`false` (and `1`/`true`) is honoured; `LONGPORT_DRY_RUN=maybe` is
-a startup error, not a silent default.
+The same evidence is visible at runtime: with the *live* gate deliberately
+satisfied on a read-only binary, the banner shows the state that tripped the
+assertion before the refusal is printed — see
+[the read-only invariant](#the-read-only-invariant-eight-binaries-assert-it).
 
 ---
 
@@ -268,32 +270,26 @@ This demo guards six different kinds of mutation with six **separate**,
 independently-defaulted gates. They are not interchangeable, and none of them
 opens another.
 
-| | Order gate | Watchlist gate | Sharelist gate | Content gate |
-| --- | --- | --- | --- | --- |
-| Guards | `SubmitOrder`, `ReplaceOrder`, `CancelOrder`, `WithdrawOrder` | `CreateWatchlistGroup`, `DeleteWatchlistGroup`, `UpdateWatchlistGroup`, `UpdatePinned` | `Create`, `Delete`, `AddSecurities`, `RemoveSecurities`, `SortSecurities` | `CreateTopic`, `CreateTopicReply` |
-| Env switch | `LONGPORT_DRY_RUN` (default `1`) | `LONGPORT_WATCHLIST_DRY_RUN` (default `1`) | `LONGPORT_SHARELIST_DRY_RUN` (default `1`) | `LONGPORT_CONTENT_DRY_RUN` (default `1`) |
-| Flag | `--confirm-live` | `--confirm` | `--confirm-live-sharelist` | `--confirm-live-content` |
-| Also requires | `LONGPORT_MODE=live` | — | `LONGPORT_MODE=live` | `LONGPORT_MODE=live` |
-| Implementation | `config.GuardWrite` | `config.GuardWatchlist` | `config.SharelistGuard` (a `config.WriteGuard`) | `config.ContentGuard` (a `config.WriteGuard`) |
-| Blocked exit code | `3` (`config.ExitBlocked`) | `3` (`config.ExitBlocked`) | **`3`** | **`3`** |
+**The normative statement of these six gates is
+[`openspec/specs/write-gates/`](openspec/specs/write-gates/spec.md)** — what each
+one requires, in what order it refuses, and what a refusal guarantees about the
+network. The values that are useful at a glance, to point a shell at the right
+switch:
 
-Two further gates — for DCA plans and price alerts — use the same shared,
-reusable `config.WriteGuard` helper as the sharelist and content gates above,
-rather than a per-command copy of the loop:
+| | Order | Watchlist | Sharelist | Content | DCA | Price alert |
+| --- | --- | --- | --- | --- | --- | --- |
+| Env switch (default `1`) | `LONGPORT_DRY_RUN` | `LONGPORT_WATCHLIST_DRY_RUN` | `LONGPORT_SHARELIST_DRY_RUN` | `LONGPORT_CONTENT_DRY_RUN` | `LONGPORT_DCA_DRY_RUN` | `LONGPORT_ALERT_DRY_RUN` |
+| Flag | `--confirm-live` | `--confirm` | `--confirm-live-sharelist` | `--confirm-live-content` | `--confirm-live-dca` | `--confirm-live-alert` |
+| Also requires | `LONGPORT_MODE=live` | — | `LONGPORT_MODE=live` | `LONGPORT_MODE=live` | `LONGPORT_MODE=live` | `LONGPORT_MODE=live` |
+| Refusal exits | `3` | `3` | `3` | `3` | `3` | `3` |
 
-| | DCA gate | Price-alert gate |
-| --- | --- | --- |
-| Guards | `Create`, `Update`, `Pause`, `Resume`, `Stop`, `SetReminder` | `Add`, `Update`, `Delete` |
-| Env switch | `LONGPORT_DCA_DRY_RUN` (default `1`) | `LONGPORT_ALERT_DRY_RUN` (default `1`) |
-| Flag | `--confirm-live-dca` | `--confirm-live-alert` |
-| Also requires | `LONGPORT_MODE=live` | `LONGPORT_MODE=live` |
-| Implementation | `config.DCAGuard` (a `config.WriteGuard`) | `config.AlertGuard` (a `config.WriteGuard`) |
-| Blocked exit code | `3` | `3` |
-
-All six gates refuse independently and all six exit **3**. See
-[`dca`](#dca--dollar-cost-averaging-plans-with-a-dedicated-write-gate),
-[`alert`](#alert--price-alerts-with-a-dedicated-write-gate) and
-[The reusable write guard](#the-reusable-write-guard).
+The four gates from `LONGPORT_SHARELIST_DRY_RUN` rightwards are all the same
+`config.WriteGuard` value with a different switch and flag; the order and
+watchlist gates predate it. See
+[The reusable write guard](#the-reusable-write-guard) for the shared helper, and
+[`dca`](#dca--dollar-cost-averaging-plans-with-a-dedicated-write-gate) /
+[`alert`](#alert--price-alerts-with-a-dedicated-write-gate) for the two that
+drive it.
 
 Every binary's `-h` prints **all six** dry-run switches plus `LONGPORT_MODE` in
 its `Safety:` block, so the set of switches is discoverable from any command
@@ -505,14 +501,26 @@ refuse to run at all, rather than proceeding in a misconfigured environment:
 | | |
 | --- | --- |
 | Binaries | `quote`, `watch`, `warrant`, `reference`, `portfolio`, `fundamentals`, `market`, `screener` |
-| Check | `if cfg.GuardWrite("run the …") == nil { cli.Fail(…) }` |
+| Check | `cli.AssertReadOnly(cfg, "<name>", "run the …")` |
 | Exit | **1**, `internal invariant violated: <name> is read-only but the order gate is open` |
 
 ```console
-$ LONGPORT_DRY_RUN=0 LONGPORT_MODE=live ./bin/market
-[config] mode=live dry_run=false app_key=abcd******gh http=https://openapi.longbridge.com (SDK default) …
+$ LONGPORT_DRY_RUN=0 LONGPORT_MODE=live \
+  LONGBRIDGE_APP_KEY=dummydummydummy LONGBRIDGE_APP_SECRET=dummysecret \
+  LONGBRIDGE_ACCESS_TOKEN=dummytoken ./bin/market
+[config] mode=live dry_run=false app_key=dumm******my http=https://openapi.longbridge.com (SDK default) quote_ws=wss://openapi-quote.longbridge.com/v2 (SDK default) trade_ws=wss://openapi-trade.longbridge.com/v2 (SDK default)
 error: internal invariant violated: market is read-only but the order gate is open
+exit=1
 ```
+
+The one-line `cli.AssertReadOnly` call is a real change, not a reformat. The eight
+binaries used to inline the same four lines, and the copies had already drifted:
+`cmd/quote` said *"the **write** gate is open"* where the other seven and this
+document said *"the **order** gate"*. The message now exists once, in
+`internal/cli`, so the noun cannot drift again — and the mutation that put the
+wrong noun back is one the suite now catches, which it did not. See
+[Honest status](#honest-status) and
+[The suite has been mutation-checked](#the-suite-has-been-mutation-checked).
 
 `cmd/market` and `cmd/watch` joined the set in this pass. Both were verified
 before being added rather than assumed:
@@ -531,10 +539,49 @@ The other seven binaries that gate writes but do **not** carry the assertion are
 `trade`, `executions`, `watchlist`, `sharelist`, `content`, `dca` and `alert` —
 correctly, because for them an open order gate is a legitimate state.
 
-**This assertion is not test-covered, in any of the eight.** It lives in
-`main()`, and `main()` is not reachable from a test. Deleting any one of the
-eight checks leaves the suite green; that was checked by mutation. Do not read
-the test suite as evidence that this holds.
+**This assertion is test-covered, in all eight, and it was not for a long time.**
+It used to be untested: it lives in `main()`, and `main()` is not reachable from a
+test, so deleting any one of the eight checks left the suite green. Two things
+closed that gap, and both are worth naming because neither is a normal test:
+
+- **`test/readonly_invariant_test.go` parses the source.** For each of the eight
+  it asserts that `main()` calls `cli.AssertReadOnly` **exactly once**, as a
+  **top-level statement** (not hidden inside the `cli.Run` closure), on the
+  config it just loaded (`cfg`), with the binary's own name and the action string
+  that `GuardWrite` would have printed — and that a `// SAFETY` comment sits
+  directly above it, after the `[config]` banner and before the first `cli.Run`.
+  Two further tests in the same file make the lists self-policing: a ninth
+  `cmd/` directory that is in neither the read-only nor the writing list fails,
+  and a binary that *can* write fails if it carries `AssertReadOnly` at all.
+- **`internal/cli` drives the helper itself.** `TestAssertReadOnly_ClosedGateReturnsNil`
+  runs all eight binaries against all three closed-gate configurations;
+  `TestAssertReadOnly_OpenGateIsTheOnlyCellGuardWriteAdmits` pins the premise
+  that live-with-dry-run-off is the single admitting cell; and
+  `TestAssertReadOnly_OpenGateExitsOneMisconfiguration` re-runs the test binary
+  as a subprocess for all eight, pinning **exit 1** and the stderr line *byte for
+  byte*. That last one is what now fails if the message drifts back to "write
+  gate".
+
+Mutation-checked, one mutation per property, in a scratch copy of the repo:
+
+```console
+$ # delete the call from cmd/market
+$ go test -count=1 -run TestReadOnlyCommands ./test/
+--- FAIL: TestReadOnlyCommands_AssertReadOnlyIsCalledInMain (0.04s)
+    --- FAIL: …/market (0.01s)
+        readonly_invariant_test.go:149: cmd/market/main.go contains 0 cli.AssertReadOnly calls,
+        want exactly 1; the assertion must exist once, in main(), or it is not being enforced at all
+# the same FAIL for a wrong name argument, a wrong action string, a call moved
+# inside the cli.Run closure, a missing // SAFETY note, and a call hoisted above
+# the [config] banner; and in internal/cli for "write gate" in place of "order gate"
+```
+
+**What this still does not prove.** The parser reads syntax, not behaviour: it
+cannot tell you that a read-only binary genuinely has no write path, and a
+mis-classification in either list is invisible to it. That judgement is still a
+human's, made by reading the binary's SDK calls. What the tests *can* catch is
+the thing that actually went wrong before — an assertion nobody ever checked.
+See `openspec/specs/read-only-invariant/`.
 
 ---
 
@@ -1805,20 +1852,31 @@ reported as a wrong format even when the file does not exist.
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
-| `LONGPORT_DRY_RUN` | `1` | Blocks all order writes. Must be `0` to write. |
+| `LONGPORT_DRY_RUN` | `1` | Order gate. Must be `0` **and** `--confirm-live` **and** `LONGPORT_MODE=live`. |
 | `LONGPORT_MODE` | `simulated` | `simulated` or `live`. |
-| `LONGPORT_WATCHLIST_DRY_RUN` | `1` | Blocks watchlist writes. Must be `0` to write. See [the six gates](#the-six-safety-gates). |
-| `LONGPORT_SHARELIST_DRY_RUN` | `1` | Blocks sharelist writes. Must be `0` **and** `--confirm-live-sharelist` **and** `LONGPORT_MODE=live`. |
-| `LONGPORT_CONTENT_DRY_RUN` | `1` | Blocks publishing topics/replies. Must be `0` **and** `--confirm-live-content` **and** `LONGPORT_MODE=live`. |
-| `LONGPORT_DCA_DRY_RUN` | `1` | Blocks DCA plan writes. Must be `0` **and** `--confirm-live-dca` **and** `LONGPORT_MODE=live`. |
-| `LONGPORT_ALERT_DRY_RUN` | `1` | Blocks price-alert writes. Must be `0` **and** `--confirm-live-alert` **and** `LONGPORT_MODE=live`. |
+| `LONGPORT_WATCHLIST_DRY_RUN` | `1` | Watchlist gate. Must be `0` **and** `--confirm`. |
+| `LONGPORT_SHARELIST_DRY_RUN` | `1` | Sharelist gate. Must be `0` **and** `--confirm-live-sharelist` **and** `LONGPORT_MODE=live`. |
+| `LONGPORT_CONTENT_DRY_RUN` | `1` | Content gate. Must be `0` **and** `--confirm-live-content` **and** `LONGPORT_MODE=live`. |
+| `LONGPORT_DCA_DRY_RUN` | `1` | DCA gate. Must be `0` **and** `--confirm-live-dca` **and** `LONGPORT_MODE=live`. |
+| `LONGPORT_ALERT_DRY_RUN` | `1` | Price-alert gate. Must be `0` **and** `--confirm-live-alert` **and** `LONGPORT_MODE=live`. |
+
+All six default to `1`, all six are checked in `config.Load` via
+`declaredGuards()`, so an **unparseable** value (`LONGPORT_DCA_DRY_RUN=maybe`) is
+a startup error for *every* binary, not just the one that owns the gate. The
+normative conditions are in
+[`openspec/specs/write-gates/`](openspec/specs/write-gates/spec.md); the
+discoverability check is the `-h` transcript under
+[the six safety gates](#the-six-safety-gates).
 
 ### Exit codes
+
+**The normative statement is
+[`openspec/specs/exit-codes/`](openspec/specs/exit-codes/spec.md).** At a glance:
 
 | Code | Meaning |
 | --- | --- |
 | `0` | Success. The command did what it was asked. |
-| `1` | A real failure: the API rejected the call, a flag value was unusable, a flag was unknown, or a config file could not be used. |
+| `1` | A real failure: the API rejected the call, a flag value was unusable, a flag was unknown, a read-only binary found the order gate open, or a config file could not be used. |
 | `2` | **Missing credentials, and nothing else.** |
 | `3` | **BLOCKED.** A safety guard refused a write. Nothing was sent. |
 
@@ -1826,15 +1884,44 @@ Exit `2` is reached by exactly one condition: a `*config.MissingCredentialError`
 An earlier version of this table said exit 2 also covered "a usage error", which
 contradicted the row above it and the code. A bad flag — unknown, or a value
 the command cannot use — is a `flag` error, is **not** a
-`MissingCredentialError`, and therefore exits **1**:
+`MissingCredentialError`, and therefore exits **1**. Measured on the built
+binaries, with and without credentials present:
 
 ```console
-$ go run ./cmd/quote -period nonsense >/dev/null 2>&1; echo $?
+$ ./bin/quote -nope >/dev/null 2>&1; echo $?          # unknown flag, no credentials
+1
+$ ./bin/quote -count abc >/dev/null 2>&1; echo $?     # unusable value, no credentials
+1
+$ ./bin/market -sections nonsense 2>&1 | tail -1; echo ${PIPESTATUS[0]}
+error: unknown section "nonsense" in -sections: want one of status, calendar, timeline, ahpremium, ahpremium-intraday, anomaly, broker-holding, broker-holding-daily, broker-holding-detail, constituent, top-movers, rank-categories, rank-list, trade-stats
 1
 $ env -u LONGBRIDGE_APP_KEY -u LONGBRIDGE_APP_SECRET -u LONGBRIDGE_ACCESS_TOKEN \
-    go run ./cmd/quote >/dev/null 2>&1; echo $?
+    ./bin/quote >/dev/null 2>&1; echo $?
 2
 ```
+
+**A correction to an earlier claim in this file.** It used to show
+`go run ./cmd/quote -period nonsense` exiting `1` as the bad-flag-value example.
+The status was right and the *reason* was wrong. `-period` is not validated at
+parse time — it is parsed inside `printCandles`, which runs only after the quote
+context exists — so with dummy credentials that command exits `1` on the 401 it
+gets while creating the context, before the period is ever looked at, and with no
+credentials it exits `2`:
+
+```console
+$ LONGBRIDGE_APP_KEY=dummydummydummy LONGBRIDGE_APP_SECRET=dummysecret \
+  LONGBRIDGE_ACCESS_TOKEN=dummytoken ./bin/quote -period nonsense 2>&1 | tail -1
+error: creating quote context: failed to create core: failed to get otp: longbridge openapi error, httpStatus:401 code:401004 message:token invalid trace:…
+$ env -u LONGBRIDGE_APP_KEY -u LONGBRIDGE_APP_SECRET -u LONGBRIDGE_ACCESS_TOKEN \
+    ./bin/quote -period nonsense >/dev/null 2>&1; echo $?
+2
+```
+
+So that transcript was never evidence about bad flag values. The three
+measurements above are, because the flag layer runs before credentials are
+resolved. The `1` that `-period nonsense` eventually produces is pinned in
+`TestPrintCandles_RejectsABadPeriodBeforeUsingTheClient`, which drives
+`printCandles` with a `nil` client so only the period check is reachable.
 
 Exit `2` exists so a script can rely on it meaning "go and fix your
 environment", and nothing else. The distinction is made once, in `cli.Fail`,
@@ -1866,16 +1953,22 @@ Two things keep landing on the wrong code, so both are now stated as rules:
 - **A read-only binary with the order gate open is 1, not 3.** Exit 3 is
   reserved for a *guard refusing a write*; a reader that refuses to start is not
   that. See
-  [the read-only invariant](#the-read-only-invariant-eight-binaries-assert-it).
+  [the read-only invariant](#the-read-only-invariant-eight-binaries-assert-it)
+  and [`openspec/specs/read-only-invariant/`](openspec/specs/read-only-invariant/spec.md).
 
 ### Secret handling
 
-`app_secret` and `access_token` are never printed or logged, not even
-redacted — they are pure credentials with no diagnostic value. The startup
-banner redacts the App Key only, keeping at most 4 leading characters:
+The rule is in
+[`openspec/specs/secret-handling/`](openspec/specs/secret-handling/spec.md). The
+two values worth knowing at a glance: `app_secret` and `access_token` are never
+printed **at all**, not even redacted, and the app key is masked to a
+**fixed-width** `abcd******yz` so the length of the key does not leak off the
+banner either. What that looks like:
 
 ```console
-[config] mode=simulated  (expected: credentials from a SIMULATED account) dry_run=true app_key=dumm******78 http=https://openapi.longbridge.com (SDK default) ...
+$ LONGBRIDGE_APP_KEY=dummykeydummy78 LONGBRIDGE_APP_SECRET=dummysecret \
+  LONGBRIDGE_ACCESS_TOKEN=dummytoken ./bin/quote -count 1
+[config] mode=simulated  (expected: credentials from a SIMULATED account) dry_run=true app_key=dumm******78 http=https://openapi.longbridge.com (SDK default) quote_ws=wss://openapi-quote.longbridge.com/v2 (SDK default) trade_ws=wss://openapi-trade.longbridge.com/v2 (SDK default)
 ```
 
 `.gitignore` excludes `.env`, `.env.*`, `config.yaml`, `config.local.yaml`,
@@ -1890,13 +1983,26 @@ error rather than a confusing SDK one.
 ## SDK coverage
 
 **All 153 exported context methods across all twelve context types are covered:
-153 of 153.** `cmd/screener` closed the last gap, `ScreenerContext`.
+153 of 153.** `cmd/screener` closed the last gap, `ScreenerContext`. The
+normative statement of the requirement — and of what the check is *not* allowed
+to be read as proving — is
+[`openspec/specs/sdk-coverage/`](openspec/specs/sdk-coverage/spec.md). This
+section is the evidence.
 
-You can check that claim yourself without trusting this README. **One command
-covers every context**, and it is deliberately receiver-agnostic — note the
-`[a-z]+` in the pattern, not `[cd]`. The receiver letter is not uniform across
-the SDK: `MarketContext`'s methods are declared on `m *MarketContext` while
-every other context uses `c *XContext` (and DCA uses `d`). A pattern written as
+The claim is enforced, not just asserted: `make coverage-check` re-derives the
+list from the module cache and exits non-zero if any method is unreferenced, and
+`make verify` runs it.
+
+```console
+$ make coverage-check
+sdk coverage: 153/153 context methods covered
+```
+
+You can also check it yourself without trusting either. **One command covers
+every context**, and it is deliberately receiver-agnostic — note the `[a-z]+` in
+the pattern, not `[cd]`. The receiver letter is not uniform across the SDK:
+`MarketContext`'s methods are declared on `m *MarketContext` while every other
+context uses `c *XContext` (and DCA uses `d`). A pattern written as
 `\(c \*` silently misses all 12 `MarketContext` methods, which is why the older
 version of this section was quietly incomplete.
 
@@ -1962,9 +2068,10 @@ every method was *exercised against a live account*. No command in this repo
 has been run with a working access token, so no successful response has ever
 been observed. See [Honest status](#honest-status).
 
-The per-context picture, and where each group lives:
+The per-context picture — the counts, and **which command file each group lives
+in**, which is the part the spec cannot hold for you:
 
-| Area | Context type | Methods | Covered | Notes |
+| Area | Context type | Methods | Covered | Lives in |
 | --- | --- | --- | --- | --- |
 | Market data | `QuoteContext` | 47 | 47 | `cmd/quote`, `cmd/watch`, `cmd/market` (2 sections), `cmd/executions`, `cmd/reference`, `cmd/warrant`, `cmd/watchlist -action list`. |
 | Fundamentals | `FundamentalContext` | 32 | 32 | `cmd/fundamentals`, one `-action` per method. |
@@ -2010,24 +2117,37 @@ What *was* verified by execution:
 
 - `gofmt -l .` reports nothing.
 - `go build ./...` and `go vet ./...` both exit 0.
-- The test suite passes: **435** test functions across **15** packages,
-  **2 477** passing cases including subtests, one helper-process test skipped.
+- `make verify` is green: `fmt-check`, `vet`, `test` (`go test -race ./...`),
+  `build`, and `coverage-check`.
+- The test suite passes: **451** test functions across **16** packages,
+  **2 576** passing cases including subtests, one helper-process test skipped.
   See [Development](#development).
 - The suite is green under `-race`, `-count=2` and `-shuffle=on`, under a
   deliberately hostile `env -i` environment, with poisoned
   `LONGBRIDGE_*`/`LONGPORT_*` values set, and with a stray credentialed
   `config.yaml` dropped in both the repository root and `cmd/dca/`.
-- Every new test assertion was **mutation-checked**: the production code was
-  reverted with the tests kept, and 16 of the 18 mutations tried turn the suite
-  red with the specific test that was written for them. The two that do not are
-  the new read-only invariant assertions, which live in `main()` and are
-  therefore invisible to the suite; that gap is named rather than glossed, under
+- **The read-only invariant is now mutation-covered.** Six mutations of
+  `cmd/market`'s startup assertion — deleting it, changing the name argument,
+  changing the action string, moving it inside the `cli.Run` closure, deleting
+  the `// SAFETY` note, hoisting it above the `[config]` banner — each turn
+  `test/` red with the message naming the property that broke, and a seventh
+  mutation that puts "write gate" back in `internal/cli` turns `internal/cli`
+  red on the byte-for-byte stderr comparison. That was not true before this
+  pass: those were the two mutations of the original eighteen that stayed
+  green, and both are now caught. The full record is under
   [Development](#development).
+- Every other new test assertion was **mutation-checked** the same way: the
+  production code was reverted with the tests kept, and 16 of the 18 mutations
+  tried turn the suite red with the specific test that was written for them.
 - All **fifteen** binaries build; `-h` exits 0 with no credentials.
 - All fifteen exit **2** with a readable missing-credentials message listing all
   three variables, and no panic.
-- A bad flag value exits **1**, not 2: `go run ./cmd/quote -period nonsense`
-  → 1, while unsetting the three credentials → 2. Verified for both.
+- A bad flag exits **1**, not 2, in every form that reaches the flag layer:
+  `./bin/quote -nope` → 1, `./bin/quote -count abc` → 1 and
+  `./bin/market -sections nonsense` → 1, all with the three credentials unset,
+  while the same unset environment on a valid command line → 2. An earlier
+  version of this file used `-period nonsense` for the same point and was
+  measuring the wrong thing; see [Exit codes](#exit-codes).
 - With dummy credentials, every command reaches the real Longbridge API and
   fails with `httpStatus:401 code:401004 message:token invalid` — proving the
   config, signing and network path are genuinely wired, not stubbed. This was
@@ -2066,11 +2186,14 @@ What *was* verified by execution:
   context types. The old snippets used `\(c \*` and so silently skipped all 12
   `MarketContext` methods; the check is receiver-agnostic now.
 
-**A 401 is a real answer, not a successful one.** It proves the request was
-built, signed and delivered, and rejected. It says nothing about the shape of a
-successful response, whether a column is wide enough for a real security name,
-or whether a field is really optional. Nothing below should be read as
-"this output was observed from Longbridge".
+**A 401 is a real answer, not a successful one.** The rule this sentence states
+is normative in
+[`openspec/specs/verification-honesty/`](openspec/specs/verification-honesty/spec.md);
+it is repeated here because everything in this section leans on it. A 401 proves
+the request was built, signed and delivered, and rejected. It says nothing about
+the shape of a successful response, whether a column is wide enough for a real
+security name, or whether a field is really optional. Nothing below should be
+read as "this output was observed from Longbridge".
 
 Specifically verified about the guards:
 
@@ -2228,9 +2351,9 @@ is no longer true, and it was never true of the parts that matter most. See
 
 ## Development
 
-There is a test suite, and it now covers **15 of the 17 packages in the repo** —
-`internal/config`, `internal/cli`, and thirteen `cmd/*` binaries. Only
-`cmd/portfolio` and `cmd/watch` have no test file.
+There is a test suite, and it now covers **16 of the 18 packages in the repo** —
+`internal/config`, `internal/cli`, the `test/` package, and thirteen `cmd/*`
+binaries. Only `cmd/portfolio` and `cmd/watch` have no test file.
 
 ```bash
 go test ./...                                        # everything
@@ -2241,11 +2364,31 @@ go test -count=2 ./...                               # no state leaks between ru
 go test -run 'Parser|Enum|Sentinel' ./... -v         # the enum-conversion suites
 ```
 
-There is **no `make test` target** in this repo's `Makefile` — use `go test`
-directly, or `make all` for `fmt + vet + build`. Check with `make help`; the
-target list is `build`, `fmt`, `fmt-check`, `vet`, `tidy`, `clean`, `help` and
-fourteen `run-*`. (The sibling `tiger-go-demo` does have `make test`; the two
-Makefiles are not kept in step.)
+The `Makefile` has grown three targets since this section was last written, and
+`verify` now runs all of them:
+
+| Target | What it does |
+| --- | --- |
+| `make test` | `go test -race ./...` |
+| `make coverage-check` | Re-derives the SDK context-method list from the module cache and **fails** if any method is unreferenced from `cmd/`. Prints `sdk coverage: 153/153 context methods covered`. |
+| `make verify` | `fmt-check vet test build coverage-check` — the whole CI set. |
+
+The rest of the targets are unchanged: `all` (`fmt vet build`), `build`, `fmt`,
+`fmt-check`, `vet`, `tidy`, `clean`, `help` and fifteen `run-*`. Run
+`make help` for the annotated list.
+
+```console
+$ make verify
+gofmt clean
+go vet ./...
+go test -race ./...
+ok  	github.com/shing1211/longbridge-go-demo/internal/config	0.226s
+ok  	github.com/shing1211/longbridge-go-demo/test	0.087s
+  build quote
+  …
+  build screener
+sdk coverage: 153/153 context methods covered
+```
 
 ### The numbers
 
@@ -2253,23 +2396,25 @@ Makefiles are not kept in step.)
 | --- | --- | --- | --- |
 | `internal/config` | 81 | 466 | **100.0%** |
 | `cmd/fundamentals` | 62 | 414 | 19.8% |
-| `internal/cli` | 39 | 121 (120 pass + 1 skip) | **98.6%** |
-| `cmd/warrant` | 36 | 254 | 55.6% |
+| `internal/cli` | 43 | 160 (159 pass + 1 skip) | **98.7%** |
+| `cmd/warrant` | 36 | 254 | 55.9% |
 | `cmd/dca` | 35 | 174 | 48.8% |
 | `cmd/market` | 27 | 150 | 21.1% |
 | `cmd/sharelist` | 27 | 120 | 36.1% |
 | `cmd/alert` | 25 | 121 | 44.2% |
 | `cmd/trade` | 23 | 129 | 35.7% |
-| `cmd/screener` | 20 | 135 | 41.4% |
+| `cmd/screener` | 20 | 135 | 41.6% |
 | `cmd/content` | 16 | 92 | 31.0% |
 | `cmd/executions` | 16 | 115 | 17.2% |
 | `cmd/reference` | 16 | 100 | 8.6% |
-| `cmd/quote` | 8 | 60 | 11.9% |
-| `cmd/watchlist` | 4 | 27 | 3.2% |
-| **Total** | **435** | **2 478** (2 477 pass + 1 skip) | — |
+| `cmd/watchlist` | 13 | 69 | 44.9% |
+| `cmd/quote` | 8 | 60 | 12.0% |
+| `test` | 3 | 18 | *no statements* |
+| **Total** | **451** | **2 577** (2 576 pass + 1 skip) | — |
 
 Sorted by test functions. `cmd/portfolio` and `cmd/watch` have no test file and
-so appear in no row; `go test -cover ./...` reports them at 0.0%.
+so appear in no row; `go test -cover ./...` reports them at 0.0%. The `test`
+package holds no production code — it exists to read the other packages' source.
 
 "Test functions" counts `func TestXxx` declarations; "cases executed" counts
 every test case the runner actually entered, subtests included. The one skip is
@@ -2278,19 +2423,19 @@ meaningful when re-executed by its parent. To reproduce the totals:
 
 ```console
 $ go test -count=1 -v ./... 2>&1 | grep -cE '^\s*--- PASS'
-2477
+2576
 $ go test -count=1 -v ./... 2>&1 | grep -cE '^\s*--- SKIP'
 1
 $ grep -rhE '^func Test' --include='*_test.go' . | wc -l
-435
+451
 $ go test -cover ./... | wc -l
-17
+18
 $ make build && ls bin | wc -l
 15
 ```
 
-`internal/config` is at **100.0% of statements**. `internal/cli` is at **98.6%**,
-and the single uncovered statement is `internal/cli/cli.go:141` — the `return
+`internal/config` is at **100.0% of statements**. `internal/cli` is at **98.7%**,
+and the single uncovered statement is `internal/cli/cli.go:194` — the `return
 cfg` on `Usage.Load`'s **credentialed success path**. It is unreachable from a
 test that has no real credentials, because the only way past the `Load` error
 branch is a successful `appcfg.Load`. The failure path on the line above
@@ -2300,10 +2445,10 @@ branch is a successful `appcfg.Load`. The failure path on the line above
 
 **Read the per-package percentages in that table as "how much of the flag and
 parse layer is tested", not as "how much of the binary is tested".** The range
-is wide and the low end is low: 3.2% for `cmd/watchlist`, 8.6% for
-`cmd/reference`, 11.9% for `cmd/quote`, 17.2% for `cmd/executions`, 19.8% for
-`cmd/fundamentals`. The 55.6% at the top of the range is the most-covered
-package, not a typical one.
+is wide and the low end is low: 8.6% for `cmd/reference`, 12.0% for
+`cmd/quote`, 17.2% for `cmd/executions`, 19.8% for `cmd/fundamentals`, 21.1%
+for `cmd/market`. The 55.9% at the top of the range (`cmd/warrant`) is the
+most-covered package, not a typical one.
 
 The reason is structural, and it is not going to change. The `print*` functions
 take a **live SDK context** — `printBrokerHolding(ctx, mc *market.MarketContext)`,
@@ -2312,7 +2457,7 @@ The SDK offers **no seam** to fake one: it is a concrete struct over a concrete
 HTTP client and websocket, there is no interface to substitute, and there is no
 exported constructor that takes a transport. A test that wants to exercise
 `printBrokerHolding` therefore has to hold a real `*market.MarketContext`, which
-means credentials and a network round trip. **143 functions in this repo are at
+means credentials and a network round trip. **136 functions in this repo are at
 0.0% statement coverage**: all 15 `main()` functions, and 86 of the 110 `print*`
 functions — the rest of that list is `do*` and `execute` bodies that sit behind
 the same wall.
@@ -2388,15 +2533,18 @@ rather than assumed:
 - **The exit-code mapping** in `cli.Fail` — 0/1/2/3, and specifically that a
   `flag` parse error is **1** while only a `MissingCredentialError` is **2**.
   The mapping is executed for real, by re-running the test binary as a
-  subprocess and checking the actual exit status.
-- **Every gate's refusal is fail-closed**: unset and unparseable
-  `*_DRY_RUN` both mean "dry run", a missing flag refuses even with the env
-  cleared and vice versa, an unknown `Mode` refuses, and `GuardWrite` with an
-  empty action is a plain error rather than a refusal.
+  subprocess and checking the actual exit status. The rule itself is
+  [`openspec/specs/exit-codes/`](openspec/specs/exit-codes/spec.md).
+- **Every gate's refusal is fail-closed** — unset and unparseable `*_DRY_RUN`
+  both mean "dry run", a missing flag refuses even with the env cleared and vice
+  versa, an unknown `Mode` refuses, and `GuardWrite` with an empty action is a
+  plain error rather than a refusal. The conditions are
+  [`openspec/specs/write-gates/`](openspec/specs/write-gates/spec.md); the
+  `TestGuard*` and `TestWriteGuard*` cases are how this repo knows it matches.
 - **The four `WriteGuard` values are asserted field by field** in
-  `TestDeclaredGuards`, plus set-level invariants (no two gates may share a
+  `TestDeclaredGuards`, plus two set-level invariants: no two gates may share a
   switch, and `declaredGuards()` and the test must list the same number of
-  gates). So editing `DCAGuard.RequireLive`, or adding a fifth gate in one place
+  gates. So editing `DCAGuard.RequireLive`, or adding a fifth gate in one place
   and not the other, fails the suite immediately. Go offers no constant structs
   and therefore no compile-time freeze, and this is the closest available
   substitute.
@@ -2407,10 +2555,13 @@ rather than assumed:
   with a message about the three switches.
 - **The credential precedence rules**: environment beats file, canonical
   `LONGBRIDGE_*` beats deprecated `LONGPORT_*`, and the error message lists
-  *every* missing variable rather than the first.
-- **The YAML-only config rule**: the candidate list is exactly
-  `config.yaml`, `config.local.yaml`; a `.yml` or `.toml` explicit path is
-  rejected, and the extension is checked *before* the file is stat'ed.
+  *every* missing variable rather than the first. The precedence and the
+  candidate list are normative in
+  [`openspec/specs/config-loading/`](openspec/specs/config-loading/spec.md);
+  `TestCandidateFilesAreYamlOnly` and
+  `TestLoad_ExplicitNonYamlPathIsAPlainError` pin the YAML-only half, including
+  that the extension is checked *before* the file is stat'ed, so a wrong format
+  is reported as a wrong format even when the file does not exist.
 - **Formatting helpers** in `cli` and in the commands: `Dec`/`Dec4` render `nil`
   as `-` and zero as a real figure, `Truncate` never emits a broken rune or
   slices at a negative index, `Redact` does not leak the length of a long
@@ -2426,16 +2577,15 @@ rather than assumed:
 
 Stated plainly, because the percentages above invite the wrong conclusion:
 
-- **None of the 8 read-only invariant assertions is test-covered.** All eight
-  binaries (`quote`, `watch`, `warrant`, `reference`, `portfolio`,
-  `fundamentals`, `market`, `screener`) refuse to start when the order gate is
-  open, and no test can see it: the check is in `main()`, and `main()` is
-  untestable for the same reason the `print*` functions are. This was checked by
-  mutation — deleting each of the eight assertions in turn leaves the suite
-  **green**. That is a real gap, and it is the one most likely to be mistaken
-  for coverage.
 - **No `print*` function, and no `main()` in any `cmd/*` package.** All 15
-  `main()` functions and 86 of the 110 `print*` functions are at 0.0%.
+  `main()` functions and 86 of the 110 `print*` functions are at 0.0%. The
+  source-parsing tests in `test/` do not change this: they read `main.go` as
+  syntax and never execute it.
+- **Whether a read-only binary really is read-only.** The parser pins that all
+  eight call `cli.AssertReadOnly` and that the seven that can write do not. It
+  cannot check the judgement itself — that a binary classified as read-only
+  issues no writes. That is still a human's call, made by reading the SDK calls,
+  and `test/readonly_invariant_test.go` says so in its own doc comment.
 - **Nothing about a successful response.** The suite never opens a socket, so
   the "written from the SDK's struct definitions alone" caveat under
   [Honest status](#honest-status) is unchanged by any of this.
@@ -2446,8 +2596,9 @@ A test that cannot fail proves nothing, so every new assertion was re-checked by
 **reverting the production code and keeping the tests**: apply the old
 behaviour, confirm the suite goes red, put the fix back.
 
-Sixteen of the eighteen mutations tried go red exactly as predicted, naming the
-test that was written for them. The headline case is the `-frequency` default:
+**Sixteen of the eighteen mutations tried went red exactly as predicted**,
+naming the test that was written for them. (The two that did not are dealt with
+at the end of this section.) The headline case is the `-frequency` default:
 
 ```console
 $ # put u.FS.StringVar(&frequency, "frequency", "monthly", …) back, keep the tests
@@ -2470,17 +2621,80 @@ returning the bare number from `parseImportance`; dropping `IsZero` from
 list again; and dropping the `truncate` boundary guard. Each of those failures
 came from a distinct named test, not from a generic compile error.
 
-**The two that do not turn red are the two new read-only assertions.** Deleting
-the `GuardWrite` check from `cmd/market` — or from `cmd/watch`, or from any of
-the other six that have one — leaves the suite **green**. That is not a
-defect in the mutation check; it is the mutation check reporting a real gap, and
-it is listed under
-[what the tests do not cover](#what-the-tests-do-not-cover) rather than
-smoothed over here.
+**The two that did not turn red were the two read-only assertions — and that
+result is now obsolete.** At the time, deleting the `GuardWrite` check from
+`cmd/market` — or from `cmd/watch`, or from any of the other six that had one —
+left the suite **green**. That was not a defect in the mutation check; it was the
+mutation check reporting a real gap, and the gap was listed under
+[what the tests do not cover](#what-the-tests-do-not-cover) rather than smoothed
+over. It has since been closed, and the same mutations now fail:
+
+```console
+$ # delete the cli.AssertReadOnly call from cmd/market, keep the tests
+$ go test -count=1 -run TestReadOnlyCommands ./test/
+--- FAIL: TestReadOnlyCommands_AssertReadOnlyIsCalledInMain (0.04s)
+    --- FAIL: …/market (0.01s)
+        readonly_invariant_test.go:149: cmd/market/main.go contains 0 cli.AssertReadOnly calls, want exactly 1
+$ # the same FAIL for a wrong name, a wrong action, a call moved inside the
+$ # cli.Run closure, a deleted // SAFETY note, and a call above the [config] banner
+$ # and, in internal/cli, for "write gate" in place of "order gate"
+$ go test -count=1 -run TestAssertReadOnly ./internal/cli/
+--- FAIL: TestAssertReadOnly_OpenGateExitsOneMisconfiguration (0.13s)
+    --- FAIL: …/quote (0.01s)
+        fail_test.go:543: stderr = "error: internal invariant violated: quote is read-only but the write gate is open\n",
+        want exactly "error: internal invariant violated: quote is read-only but the order gate is open\n"
+```
+
+So the two-count is now **18 of 18**. The honest accounting is that two of them
+needed a new kind of test rather than another assertion: `main()` cannot be
+called from a test, so `test/` reads the source instead. See
+[the read-only invariant](#the-read-only-invariant-eight-binaries-assert-it).
 
 The reason this matters is in [Honest status](#honest-status): the `-frequency`
 default is precisely the class of bug a unit-test suite is **structurally blind
 to**, and the mutation check is the only thing in this repo that could see it.
+
+---
+
+## Specification layer
+
+**`openspec/specs/` holds the normative requirements. This README holds the
+evidence and the instructions.** Where the two used to say the same thing, the
+spec now owns the rule and the README keeps the transcript, the mutation result
+and the caveat — because a rule with no recorded observation behind it is a
+claim, and a claim is what this repo is trying not to make.
+
+The layer is validated, so a spec that drifts out of shape fails rather than
+lingering:
+
+```console
+$ openspec validate --specs --strict
+- Validating...
+✓ spec/config-loading
+✓ spec/exit-codes
+✓ spec/read-only-invariant
+✓ spec/sdk-coverage
+✓ spec/secret-handling
+✓ spec/verification-honesty
+✓ spec/write-gates
+Totals: 7 passed, 0 failed (7 items)
+```
+
+Seven capabilities, 27 requirements:
+
+| Spec | What it owns |
+| --- | --- |
+| `write-gates` | the six gates: what each one requires, in what order it refuses, and what a refusal guarantees about the network |
+| `exit-codes` | the four statuses, what each means, and the two classifications that are easiest to get wrong |
+| `read-only-invariant` | the eight read-only binaries, the assertion each one carries, and exit 1 for a violation |
+| `config-loading` | credential precedence, which files are candidates, and which user errors are *not* missing-credential errors |
+| `secret-handling` | what the app key, app secret and access token render as, and the fixed-width mask |
+| `sdk-coverage` | that every exported SDK context method is referenced, and that the check proves only reference |
+| `verification-honesty` | the rule that a rejected request proves a request was built, signed, delivered and refused — and nothing more |
+
+Read a spec when you want to know **what must be true**. Read this README when
+you want to know **how it behaves, how to run it, and how far it has been
+checked**.
 
 ---
 
@@ -2563,19 +2777,24 @@ longbridge-go-demo/
 │   │   ├── file.go         YAML-only credential file loader
 │   │   └── *_test.go       81 test functions, 466 cases, 100.0% statement coverage
 │   └── cli/                shared flag parsing, credential errors, panic guard
-│       ├── cli.go
-│       ├── cli_test.go     28 test functions
-│       └── fail_test.go    11 test functions, incl. real subprocess exit codes
+│       ├── cli.go          incl. AssertReadOnly, the read-only startup assertion
+│       ├── cli_test.go     31 test functions
+│       └── fail_test.go    12 test functions, incl. real subprocess exit codes
+├── test/                   checks that read the binaries' own source
+│   └── readonly_invariant_test.go  3 test functions, 18 cases
+├── openspec/
+│   └── specs/              the normative requirements; see "Specification layer"
 ├── .env.example            every LONGPORT_*/LONGBRIDGE_* var, fully commented
 ├── config.example.yaml     YAML template, `longbridge:` block
-├── Makefile                build, fmt, fmt-check, vet, tidy, clean  (no `test` target)
+├── Makefile                build, fmt, fmt-check, vet, test, coverage-check, verify, tidy, clean
 ├── go.mod / go.sum
 └── README.md
 ```
 
-`cmd/*/main_test.go` (and `cmd/fundamentals/actions_test.go`) hold the 315
-test functions and 1 891 cases for the thirteen binaries that have a suite; see
-[Development](#development) for the per-package table and for why the coverage
+`cmd/*/main_test.go` (and `cmd/fundamentals/actions_test.go`) hold the 324
+test functions and 1 933 cases for the thirteen binaries that have a suite, and
+`test/` adds 3 more functions and 18 cases that no single package could hold;
+see [Development](#development) for the per-package table and for why the coverage
 percentages there are lower than they look. `cmd/portfolio` and `cmd/watch` have
 no test file.
 
