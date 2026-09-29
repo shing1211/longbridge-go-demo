@@ -33,6 +33,35 @@ vet: ## Run go vet
 tidy: ## Tidy go.mod / go.sum
 	$(GO) mod tidy
 
+.PHONY: test
+test: ## Run unit tests with the race detector
+	$(GO) test -race ./...
+
+# Receiver-agnostic on purpose: MarketContext declares its methods on
+# `m *MarketContext`, DCA on `d *DCAContext`, the rest on `c *XContext`.
+# A `\(c \*` pattern silently misses all 12 MarketContext methods.
+.PHONY: coverage-check
+coverage-check: ## Fail if any SDK context method is unreferenced from ./cmd
+	@set -eu; \
+	sdk=$$($(GO) list -m -f '{{.Version}}' github.com/longbridge/openapi-go); \
+	base="$$($(GO) env GOMODCACHE)/github.com/longbridge/openapi-go@$$sdk"; \
+	if [ ! -d "$$base" ]; then echo "SDK not in module cache: $$base"; exit 1; fi; \
+	list=$$(mktemp); \
+	trap 'rm -f "$$list"' EXIT; \
+	grep -rhoE '^func \([a-z]+ \*[A-Za-z]+Context\) [A-Z][A-Za-z0-9]*' "$$base" --include='*.go' \
+	  | sed -E 's/^func \([a-z]+ \*([A-Za-z]+)Context\) ([A-Za-z0-9]*)/\1 \2/' \
+	  | sort -u > $$list; \
+	total=$$(wc -l < $$list | tr -d ' '); \
+	missing=$$(while read -r ctx m; do grep -rqE "\.$$m\(" cmd/ || echo "UNCOVERED: $$ctx $$m"; done < $$list); \
+	if [ -n "$$missing" ]; then \
+		echo "sdk coverage: $$((total - $$(printf '%s\n' "$$missing" | wc -l)))/$$total"; \
+		echo "uncovered context methods:"; echo "$$missing"; exit 1; \
+	fi; \
+	echo "sdk coverage: $$total/$$total context methods covered"
+
+.PHONY: verify
+verify: fmt-check vet test build coverage-check ## Everything CI should run
+
 .PHONY: run-quote
 run-quote: ## go run ./cmd/quote
 	$(GO) run ./cmd/quote
