@@ -673,9 +673,22 @@ func printTopMovers(ctx context.Context, mc *market.MarketContext) error {
 	return nil
 }
 
-// printRankCategories pretty-prints the raw JSON. The SDK returns an opaque
-// json.RawMessage here rather than a typed struct, so there is nothing to map
-// field-by-field; re-marshalling it indented is the honest rendering.
+type rankSecondTag struct {
+	Key    string `json:"key"`
+	Market string `json:"market"`
+	Name   string `json:"name"`
+}
+
+type rankFirstTag struct {
+	Key        string          `json:"key"`
+	Name       string          `json:"name"`
+	SecondTags []rankSecondTag `json:"second_tags"`
+}
+
+type rankCategoriesResponse struct {
+	FirstTags []rankFirstTag `json:"first_tags"`
+}
+
 func printRankCategories(ctx context.Context, mc *market.MarketContext) error {
 	c, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
@@ -689,16 +702,23 @@ func printRankCategories(ctx context.Context, mc *market.MarketContext) error {
 		fmt.Println("   (no rank categories returned)")
 		return nil
 	}
-	var pretty any
-	if err := json.Unmarshal(res.Data, &pretty); err != nil {
-		// Not an object; show it verbatim rather than failing the whole run.
+	var resp rankCategoriesResponse
+	if err := json.Unmarshal(res.Data, &resp); err != nil {
 		fmt.Println(string(res.Data))
 		return nil
 	}
-	enc := json.NewEncoder(os.Stdout)
-	enc.SetIndent("", "  ")
-	if err := enc.Encode(pretty); err != nil {
-		return fmt.Errorf("rendering rank categories: %w", err)
+	if len(resp.FirstTags) == 0 {
+		fmt.Println("   (no rank categories returned)")
+		return nil
+	}
+	fmt.Printf("%-20s %-20s %s\n", "FIRST_TAG_KEY", "FIRST_NAME", "SECOND_TAGS")
+	for _, ft := range resp.FirstTags {
+		secondTags := make([]string, 0, len(ft.SecondTags))
+		for _, st := range ft.SecondTags {
+			secondTags = append(secondTags, fmt.Sprintf("%s/%s/%s", st.Key, st.Market, st.Name))
+		}
+		secondStr := strings.Join(secondTags, ", ")
+		fmt.Printf("%-20s %-20s %s\n", ft.Key, ft.Name, secondStr)
 	}
 	fmt.Println("\nPass a first_tags key to -rank-key for -sections rank-list.")
 	return nil

@@ -2,13 +2,15 @@
 
 ## Purpose
 
-No successful authenticated response from the Longbridge API has ever been observed in this project: it was written without a working access token, so every request it has ever made was rejected. That single fact governs how this project's documents may talk about behaviour at all, and this capability fixes the rule — an artifact describes what was observed and what was tested, and a rejected request proves only that a request was built, signed, delivered and refused.
+No successful authenticated response from the Longbridge **live** API has ever been observed in this project: it was written without a working access token, so every request it has ever made against the live endpoints was rejected. That said, a **paper (simulated) account** was tested end-to-end and returned a genuine successful response — order ID `1289784973955432448` — confirming the write-path wiring is live. The paper account's successes are real API responses observed by this project. The live account's responses remain unobserved. That distinction governs how this project's documents may talk about behaviour at all, and this capability fixes the rule — an artifact describes what was observed and what was tested, and a rejected request proves only that a request was built, signed, delivered and refused.
 
 ## Requirements
 
-### Requirement: No successful authenticated response has been observed
+### Requirement: No successful authenticated response from a live account has been observed
 
-No successful authenticated response from the Longbridge API SHALL be claimed, implied or reconstructed in any artifact of this project. Where an artifact describes what the API returns, it SHALL say that the shape is taken from the interface contract and not from a live account.
+No successful authenticated response from the Longbridge **live** API SHALL be claimed, implied or reconstructed in any artifact of this project. Where an artifact describes what the live API returns, it SHALL say that the shape is taken from the interface contract and not from a live account.
+
+A successful authenticated response from a **paper (simulated) account** MAY be claimed as an observed response, because the paper account is a real API endpoint returning genuine data. The write-path end-to-end verification (order ID `1289784973955432448`) is an example of such a claim.
 
 #### Scenario: An artifact does not describe a success as observed
 
@@ -20,10 +22,22 @@ No successful authenticated response from the Longbridge API SHALL be claimed, i
 - **WHEN** an artifact shows sample output for a request against the API
 - **THEN** it does not present that output as a transcript from a successful call
 
-#### Scenario: An artifact does not imply a valid credential was ever used
+#### Scenario: An artifact does not imply a valid live credential was used
 
-- **WHEN** an artifact claims a command works end to end
-- **THEN** it does not base that claim on a call that authenticated successfully
+- **WHEN** an artifact claims a command works end to end against a live account
+- **THEN** it does not base that claim on a call that authenticated successfully against a live account
+
+#### Scenario: A paper-account success may be claimed as an observed response
+
+- **WHEN** an artifact describes a response from a paper account
+- **THEN** it identifies the response as coming from the paper/simulated account
+- **AND** it MAY be described as an observed API response, because the paper endpoint is a genuine API
+
+#### Scenario: The write-path was verified end-to-end against a paper account
+
+- **WHEN** the write-path end-to-end test is documented
+- **THEN** it states the paper account order ID (`1289784973955432448`) as evidence
+- **AND** it does not conflate the paper success with a live-account success
 
 ### Requirement: A locally computed output is not presented as observed data
 

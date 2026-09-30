@@ -785,7 +785,7 @@ func TestGate_RefusalIsExplainedOnStderrAndReturnsABlockedError(t *testing.T) {
 	}
 	for _, want := range []string{
 		"[DRY-RUN] BLOCKED:", "add securities on sharelist 12345",
-		"LONGPORT_SHARELIST_DRY_RUN", "--confirm-live-sharelist", "LONGPORT_MODE=live",
+		"LONGPORT_SHARELIST_DRY_RUN", "--confirm-live-sharelist", "LONGPORT_MODE=live or =paper",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("refusal block is missing %q.\nblock was:\n%s", want, out)

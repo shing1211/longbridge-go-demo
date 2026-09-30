@@ -92,14 +92,14 @@ func main() {
 	u.FS.BoolVar(&enabled, "enabled", true,
 		"for update: enable or disable the alert")
 	u.FS.BoolVar(&confirmLiveAlt, "confirm-live-alert", false,
-		"REQUIRED for any write; must be combined with LONGPORT_ALERT_DRY_RUN=0 and LONGPORT_MODE=live")
+		"REQUIRED for any write; must be combined with LONGPORT_ALERT_DRY_RUN=0 and LONGPORT_MODE=live or =paper")
 	u.FS.DurationVar(&timeout, "timeout", 15*time.Second, "per-request timeout")
 	u.Parse(os.Args[1:])
 
 	cfg := u.Load()
 	timeout = appcfg.Timeout()
 	fmt.Fprintf(os.Stderr, "[config] %s\n", cfg)
-	fmt.Fprintf(os.Stderr, "[config] alert_dry_run=%v (dedicated gate: %s + %s + LONGPORT_MODE=live)\n",
+	fmt.Fprintf(os.Stderr, "[config] alert_dry_run=%v (dedicated gate: %s + %s + LONGPORT_MODE=live or =paper)\n",
 		appcfg.AlertGuard.DryRun(), appcfg.AlertGuard.DryRunEnv, appcfg.AlertGuard.ConfirmFlag)
 	fmt.Fprintf(os.Stderr, "[config] read-only actions: list\n")
 
@@ -329,7 +329,7 @@ func gate(cfg *appcfg.Config, action string) error {
 			"%s BLOCKED by the price-alert safety gate. Nothing was sent to Longbridge.\n"+
 				"See the [DRY-RUN] output above for the request and the full list\n"+
 				"of unsatisfied conditions. To perform it:\n"+
-				"  %s=0  +  %s  +  LONGPORT_MODE=live",
+				"  %s=0  +  %s  +  LONGPORT_MODE=live or =paper",
 			action, appcfg.AlertGuard.DryRunEnv, appcfg.AlertGuard.ConfirmFlag)
 	}
 	return nil

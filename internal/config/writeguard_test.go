@@ -81,13 +81,17 @@ func checkEightCellMatrix(t *testing.T, g WriteGuard, action string) {
 		{"flag=no env=0 mode=simulated", false, "0", true, ModeSimulated, false},
 		{"flag=yes env=unset mode=simulated", true, "", false, ModeSimulated, false},
 		{"flag=yes env=0 mode=simulated", true, "0", true, ModeSimulated, false},
+		{"flag=no env=unset mode=paper", false, "", false, ModePaper, false},
+		{"flag=no env=0 mode=paper", false, "0", true, ModePaper, false},
+		{"flag=yes env=unset mode=paper", true, "", false, ModePaper, false},
+		{"flag=yes env=0 mode=paper", true, "0", true, ModePaper, true}, // open cell: paper+dryRun=false+confirm
 		{"flag=no env=unset mode=live", false, "", false, ModeLive, false},
 		{"flag=no env=0 mode=live", false, "0", true, ModeLive, false},
 		{"flag=yes env=unset mode=live", true, "", false, ModeLive, false},
-		{"flag=yes env=0 mode=live", true, "0", true, ModeLive, true}, // the one open cell
+		{"flag=yes env=0 mode=live", true, "0", true, ModeLive, true}, // open cell: live+dryRun=false+confirm
 	}
-	if len(cells) != 8 {
-		t.Fatalf("matrix must have 8 cells, has %d", len(cells))
+	if len(cells) != 12 {
+		t.Fatalf("matrix must have 12 cells, has %d", len(cells))
 	}
 	openCount := 0
 	for _, c := range cells {
@@ -117,8 +121,8 @@ func checkEightCellMatrix(t *testing.T, g WriteGuard, action string) {
 			}
 		})
 	}
-	if openCount != 1 {
-		t.Fatalf("exactly one cell may be open for %s, %d were", g.Name, openCount)
+	if openCount != 2 {
+		t.Fatalf("exactly two cells may be open for %s (paper and live), %d were", g.Name, openCount)
 	}
 }
 
@@ -342,7 +346,7 @@ func TestWriteGuard_Unsatisfied_OrderAndCount(t *testing.T) {
 	// these assertions are on the exact sequence, not just the length.
 	flagLine := "--confirm-live-dca was not passed (pass --confirm-live-dca)"
 	envLine := "LONGPORT_DCA_DRY_RUN is on (default 1; set it to 0 to allow DCA writes)"
-	modeLine := "LONGPORT_MODE=simulated (DCA writes require LONGPORT_MODE=live)"
+	modeLineSim := "LONGPORT_MODE=simulated (DCA writes require LONGPORT_MODE=live or =paper)"
 
 	tests := []struct {
 		name      string
@@ -352,14 +356,21 @@ func TestWriteGuard_Unsatisfied_OrderAndCount(t *testing.T) {
 		mode      Mode
 		want      []string
 	}{
-		{"nothing satisfied", false, "", false, ModeSimulated, []string{flagLine, envLine, modeLine}},
-		{"only flag satisfied", true, "", false, ModeSimulated, []string{envLine, modeLine}},
-		{"only env satisfied", false, "0", true, ModeSimulated, []string{flagLine, modeLine}},
-		{"flag and env satisfied, simulated", true, "0", true, ModeSimulated, []string{modeLine}},
+		{"nothing satisfied", false, "", false, ModeSimulated, []string{flagLine, envLine, modeLineSim}},
+		{"only flag satisfied", true, "", false, ModeSimulated, []string{envLine, modeLineSim}},
+		{"only env satisfied", false, "0", true, ModeSimulated, []string{flagLine, modeLineSim}},
+		{"flag and env satisfied, simulated", true, "0", true, ModeSimulated, []string{modeLineSim}},
 		{"only mode satisfied", false, "", false, ModeLive, []string{flagLine, envLine}},
 		{"only env satisfied, live", false, "0", true, ModeLive, []string{flagLine}},
 		{"all but flag satisfied, live", true, "", false, ModeLive, []string{envLine}},
 		{"fully open", true, "0", true, ModeLive, nil},
+		// Paper mode shares the same Unsatisfied path as live (allowsWrites=true),
+		// so the mode line is NOT added — paper satisfies the write condition.
+		// Only the description differs, tested separately.
+		{"nothing satisfied, paper", false, "", false, ModePaper, []string{flagLine, envLine}},
+		{"only flag satisfied, paper", true, "", false, ModePaper, []string{envLine}},
+		{"only env satisfied, paper", false, "0", true, ModePaper, []string{flagLine}},
+		{"flag and env satisfied, paper", true, "0", true, ModePaper, nil}, // open: paper allows writes
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -381,7 +392,7 @@ func TestWriteGuard_Unsatisfied_OrderAndCount(t *testing.T) {
 func TestWriteGuard_Unsatisfied_RequireLiveFalseNeverEmitsAModeLine(t *testing.T) {
 	// A gate that does not require live must not tell the user to switch to
 	// live mode: for watchlist-style preferences that advice is simply wrong.
-	for _, mode := range []Mode{ModeSimulated, ModeLive, Mode(""), Mode("bogus")} {
+	for _, mode := range []Mode{ModeSimulated, ModePaper, ModeLive, Mode(""), Mode("bogus")} {
 		t.Run("mode="+string(mode)+"-"+fmt.Sprint(mode == ""), func(t *testing.T) {
 			sandbox(t)
 			g := writeGuardWithEnv("watchlistish", "LONGPORT_PROBE_DRY_RUN", false)
@@ -407,11 +418,11 @@ func TestWriteGuard_Unsatisfied_RequireLiveFalseNeverEmitsAModeLine(t *testing.T
 }
 
 func TestWriteGuard_Unsatisfied_ReportsAnUnrecognisedMode(t *testing.T) {
-	// Default deny: anything that is not exactly ModeLive blocks.
+	// Default deny: anything that is not ModeLive or ModePaper blocks.
 	sandbox(t)
 	t.Setenv(DCAGuard.DryRunEnv, "0")
 	got := DCAGuard.Unsatisfied(newTestConfig(Mode("live-ish"), false), true)
-	want := "LONGPORT_MODE=live-ish (DCA writes require LONGPORT_MODE=live)"
+	want := "LONGPORT_MODE=live-ish (DCA writes require LONGPORT_MODE=live or =paper)"
 	if len(got) != 1 || got[0] != want {
 		t.Fatalf("got %q, want exactly [%q]", got, want)
 	}
@@ -426,7 +437,7 @@ func TestWriteGuard_Check_MessageContent(t *testing.T) {
 		{
 			name:        "require live recipe names all three switches",
 			requireLive: true,
-			wantRecipe:  "LONGPORT_PROBE_DRY_RUN=0  +  --confirm-probe  +  LONGPORT_MODE=live",
+			wantRecipe:  "LONGPORT_PROBE_DRY_RUN=0  +  --confirm-probe  +  LONGPORT_MODE=live (or =paper for a simulated account)",
 		},
 		{
 			name:        "no live recipe omits the mode switch",

@@ -43,10 +43,22 @@ type Mode string
 
 const (
 	// ModeSimulated is the DEFAULT. Expects a simulated-account credential set.
+	// It also blocks the RequireLive gates — a stale or unset value protects
+	// against accidental writes.
 	ModeSimulated Mode = "simulated"
+	// ModePaper is for Longbridge's simulated/paper-trading account. It is
+	// distinct from ModeSimulated because it satisfies the RequireLive gate:
+	// a paper account cannot move real money, so the explicit assertion the
+	// gate demands is satisfied by naming it. Set LONGPORT_MODE=paper when
+	// running against simulated credentials and you want the write gates open.
+	ModePaper Mode = "paper"
 	// ModeLive requires an explicit opt-in and a non-dry-run flag.
 	ModeLive Mode = "live"
 )
+
+// allowsWrites is the single allowlist for the RequireLive gates.
+// It preserves default-deny: an empty or unrecognised value blocks.
+func (m Mode) allowsWrites() bool { return m == ModeLive || m == ModePaper }
 
 // Config is the validated demo configuration.
 type Config struct {
@@ -62,7 +74,9 @@ type Config struct {
 	AppSecret   string
 	AccessToken string
 
-	// Mode is ModeSimulated or ModeLive.
+	// Mode is ModeSimulated, ModePaper, or ModeLive. Use ModePaper when
+	// running against a simulated account and you want the RequireLive gates
+	// open; ModeSimulated blocks them.
 	Mode Mode
 	// DryRun blocks all order writes when true. Defaults to true.
 	DryRun bool
@@ -564,6 +578,8 @@ func (c *Config) String() string {
 	mode := string(c.Mode)
 	if c.Mode == ModeSimulated {
 		mode += "  (expected: credentials from a SIMULATED account)"
+	} else if c.Mode == ModePaper {
+		mode += "  (PAPER / simulated account — write gates are open)"
 	}
 	httpURL, quoteURL, tradeURL := effectiveEndpoints(c.SDK)
 	var b strings.Builder
@@ -593,13 +609,17 @@ func loadModeAndDryRun() (Mode, bool, error) {
 	raw := strings.ToLower(strings.TrimSpace(os.Getenv("LONGPORT_MODE")))
 	mode := ModeSimulated
 	switch raw {
-	case "", "simulated", "sim", "paper":
+	case "":
 		mode = ModeSimulated
+	case "simulated", "sim":
+		mode = ModeSimulated
+	case "paper":
+		mode = ModePaper
 	case "live":
 		mode = ModeLive
 	default:
 		return "", false, fmt.Errorf(
-			"invalid LONGPORT_MODE=%q: want \"simulated\" (default) or \"live\"", raw)
+			"invalid LONGPORT_MODE=%q: want \"simulated\", \"paper\" or \"live\"", raw)
 	}
 
 	// Dry run defaults to true. It is only disabled by an explicit, exact value.
@@ -660,16 +680,16 @@ func Timeout() time.Duration {
 // CancelOrder. It returns nil only when the operator has disabled dry run.
 // The caller must treat any error from this function as "do not call the SDK".
 //
-// # WHY THE MODE TEST IS `!= live`, NOT `== simulated`
+// # WHY THE MODE TEST USES allowsWrites(), NOT `== ModeLive`
 //
-// The rule is "allow only exactly ModeLive", never "refuse only exactly
-// ModeSimulated". The permissive form lets a Config whose Mode was never set
-// (""), mistyped ("LIVE") or invented ("paper") place a real order, and it
-// disagreed with WriteGuard.Unsatisfied in this same package, which has always
-// used the fail-closed form. Load cannot currently produce such a Config, so
-// the difference was latent rather than a live leak — but a latent hole in the
-// one function that guards money is still a hole, so the deny-by-default form
-// wins. Do not "simplify" this back to `c.Mode == ModeSimulated`.
+// The rule is "allow only exactly ModeLive or ModePaper", never "refuse only
+// exactly ModeSimulated". The permissive form lets a Config whose Mode was never
+// set (""), mistyped ("LIVE") or invented ("sandbox") place a real order, and
+// it disagreed with WriteGuard.Unsatisfied in this same package, which has
+// always used the fail-closed form. Load cannot currently produce such a Config,
+// so the difference was latent rather than a live leak — but a latent hole in
+// the one function that guards money is still a hole, so the deny-by-default
+// form wins. Do not "simplify" this back to `c.Mode == ModeSimulated`.
 func (c *Config) GuardWrite(action string) error {
 	if action == "" {
 		return errors.New("GuardWrite: action description is required")
@@ -683,13 +703,20 @@ func (c *Config) GuardWrite(action string) error {
 				"Both are required; either one alone still blocks the write.",
 			action, c.Mode)
 	}
-	if c.Mode != ModeLive {
+	if !c.Mode.allowsWrites() {
+		var hint string
+		switch c.Mode {
+		case ModeSimulated:
+			hint = "set LONGPORT_MODE=paper to use a simulated account, or LONGPORT_MODE=live to assert these are real-money credentials"
+		case Mode(""):
+			hint = "set LONGPORT_MODE=paper or LONGPORT_MODE=live"
+		default:
+			hint = fmt.Sprintf("set LONGPORT_MODE=paper (simulated account) or LONGPORT_MODE=live (real-money account); %q is not recognised", c.Mode)
+		}
 		return Blockedf(
 			"refusing to %s: mode is %q but dry run is disabled.\n"+
-				"No order was sent. Either restore LONGPORT_DRY_RUN=1, or set\n"+
-				"  LONGPORT_MODE=live\n"+
-				"to state that these are real-money credentials.",
-			action, c.Mode)
+				"No order was sent. %s.",
+			action, c.Mode, hint)
 	}
 	return nil
 }

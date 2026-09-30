@@ -39,10 +39,14 @@ import (
 //
 // # WHY REQUIRE LIVE IS PER-GATE
 //
-// GuardWrite requires live because it moves real money. GuardWatchlist does
-// not, because a saved ticker list is a preference. A third kind of mutation —
-// a recurring investment plan, a notification rule — is neither exactly, so
-// this struct makes the choice explicit per gate instead of assuming.
+// GuardWrite (and the other RequireLive gates) require live or paper because
+// they move real money or publish account state. "live" asserts real-money
+// credentials; "paper" asserts a simulated account that cannot move real money
+// — both satisfy the explicit-intent requirement the gate was designed to
+// demand. GuardWatchlist does not require it, because a saved ticker list is a
+// preference. A third kind of mutation — a recurring investment plan, a
+// notification rule — is neither exactly, so this struct makes the choice
+// explicit per gate instead of assuming.
 //
 // # NO NETWORK CALL
 //
@@ -64,7 +68,7 @@ type WriteGuard struct {
 	// "--confirm-live-dca". This is documentation only; the command owns the
 	// flag and passes the bool in.
 	ConfirmFlag string
-	// RequireLive demands LONGPORT_MODE=live. Set it for anything that
+	// RequireLive demands LONGPORT_MODE=live or =paper. Set it for anything that
 	// commits real money or publishes something irreversible.
 	RequireLive bool
 }
@@ -180,9 +184,9 @@ func (g WriteGuard) Unsatisfied(cfg *Config, confirmed bool) []string {
 			"%s is on (default 1; set it to 0 to allow %s writes)",
 			g.DryRunEnv, g.Name))
 	}
-	if g.RequireLive && cfg.Mode != ModeLive {
+	if g.RequireLive && !cfg.Mode.allowsWrites() {
 		out = append(out, fmt.Sprintf(
-			"LONGPORT_MODE=%s (%s writes require LONGPORT_MODE=live)",
+			"LONGPORT_MODE=%s (%s writes require LONGPORT_MODE=live or =paper)",
 			cfg.Mode, g.Name))
 	}
 	return out
@@ -211,7 +215,7 @@ func (g WriteGuard) Check(cfg *Config, confirmed bool, action string) error {
 	}
 	b.WriteString("\nNOTHING was sent to Longbridge. To actually perform this write, set:\n")
 	if g.RequireLive {
-		fmt.Fprintf(&b, "  %s=0  +  %s  +  LONGPORT_MODE=live\n",
+		fmt.Fprintf(&b, "  %s=0  +  %s  +  LONGPORT_MODE=live (or =paper for a simulated account)\n",
 			g.DryRunEnv, g.ConfirmFlag)
 	} else {
 		fmt.Fprintf(&b, "  %s=0  +  %s\n", g.DryRunEnv, g.ConfirmFlag)

@@ -88,7 +88,7 @@ func main() {
 			"each must be a non-empty code, one dot, and a non-empty market, with no spaces (e.g. 700.HK)")
 	u.FS.BoolVar(&confirmLive, "confirm-live-sharelist", false,
 		"REQUIRED acknowledgement for any sharelist write; must be combined with "+
-			"LONGPORT_SHARELIST_DRY_RUN=0 and LONGPORT_MODE=live")
+			"LONGPORT_SHARELIST_DRY_RUN=0 and LONGPORT_MODE=live or =paper")
 	u.FS.BoolVar(&showState, "show-state", false,
 		"for a blocked add/remove/sort: also fetch and print the list's current contents "+
 			"(this DOES make a read-only network call, so it is off by default)")
@@ -99,7 +99,7 @@ func main() {
 	timeout = appcfg.Timeout()
 	fmt.Fprintf(os.Stderr, "[config] %s\n", cfg)
 	fmt.Fprintf(os.Stderr,
-		"[config] sharelist_dry_run=%v (separate gate: %s + %s + LONGPORT_MODE=live)\n",
+		"[config] sharelist_dry_run=%v (separate gate: %s + %s + LONGPORT_MODE=live or =paper)\n",
 		appcfg.SharelistGuard.DryRun(), appcfg.SharelistGuard.DryRunEnv, appcfg.SharelistGuard.ConfirmFlag)
 
 	cli.Run(func(ctx context.Context) error {
@@ -420,7 +420,7 @@ func gate(cfg *appcfg.Config, desc string) error {
 			"%s BLOCKED by the sharelist safety gate. Nothing was sent to Longbridge.\n"+
 				"See the [DRY-RUN] output above for the request and the full list\n"+
 				"of unsatisfied conditions. To perform it:\n"+
-				"  %s=0  +  %s  +  LONGPORT_MODE=live",
+				"  %s=0  +  %s  +  LONGPORT_MODE=live or =paper",
 			desc, appcfg.SharelistGuard.DryRunEnv, appcfg.SharelistGuard.ConfirmFlag)
 	}
 	return nil

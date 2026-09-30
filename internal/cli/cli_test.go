@@ -643,14 +643,15 @@ func TestAssertReadOnly_OpenGateIsTheOnlyCellGuardWriteAdmits(t *testing.T) {
 		t.Fatalf("GuardWrite refused in %+v, so the open gate no longer exists "+
 			"and nothing can violate the invariant: %v", openGate, err)
 	}
-	// Also the other direction: a mode spelled but not live must not slip
-	// through. GuardWrite uses `!= live` rather than `== simulated` for
-	// exactly this reason, and the read-only assertion inherits that choice.
+	// Also the other direction: an unrecognised mode must not slip through.
+	// GuardWrite uses allowsWrites() — an allowlist of live and paper — rather
+	// than a denylist, so only those two modes pass. ModePaper (the new third
+	// mode) is intentionally absent from this list: it DOES pass the gate.
 	for _, mode := range []appcfg.Mode{appcfg.ModeSimulated, "", appcfg.Mode("LIVE")} {
 		cfg := &appcfg.Config{Mode: mode, DryRun: false}
 		if err := cfg.GuardWrite("run the market reader"); err == nil {
 			t.Errorf("GuardWrite admitted mode %q with dry run off; the gate is "+
-				"meant to be closed unless LONGPORT_MODE is exactly live", mode)
+				"meant to be closed unless LONGPORT_MODE is live or paper", mode)
 		}
 	}
 }
@@ -985,16 +986,16 @@ func TestUsageText_SafetySectionWarnsThatDryRunIsTheDefault(t *testing.T) {
 	if !strings.Contains(safety, "blocks all order writes") {
 		t.Error("Safety section does not say what LONGPORT_DRY_RUN blocks")
 	}
-	if !strings.Contains(safety, "LONGPORT_MODE") || !strings.Contains(safety, "live") {
-		t.Error("Safety section does not explain that live mode is a real opt-in")
+	if !strings.Contains(safety, "LONGPORT_MODE") || !strings.Contains(safety, "live") || !strings.Contains(safety, "paper") {
+		t.Error("Safety section does not explain that live and paper mode are the two real opt-ins")
 	}
 	for _, gate := range []string{"watchlist writes", "DCA plan writes", "price-alert writes"} {
 		if !strings.Contains(safety, gate) {
 			t.Errorf("Safety section does not say that %q are gated", gate)
 		}
 	}
-	if strings.Count(safety, "LONGPORT_MODE=live") < 2 {
-		t.Error("Safety section does not say which gates additionally require LONGPORT_MODE=live")
+	if strings.Count(safety, "LONGPORT_MODE=live or =paper") < 4 {
+		t.Error("Safety section does not say which gates additionally require LONGPORT_MODE=live or =paper")
 	}
 }
 

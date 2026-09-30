@@ -252,10 +252,10 @@ func TestGuardWatchlist_RefusalMessage(t *testing.T) {
 }
 
 // TestGuardWrite_FourCellMatrix pins the order gate: only "dry run off AND
-// live" lets an order through. Dry run on is blocked whatever the mode, and
-// simulated is blocked even with dry run explicitly disabled.
+// (live or paper)" lets an order through. Dry run on is blocked whatever the
+// mode, and simulated is blocked even with dry run explicitly disabled.
 func TestGuardWrite_FourCellMatrix(t *testing.T) {
-	for _, mode := range []Mode{ModeSimulated, ModeLive} {
+	for _, mode := range []Mode{ModeSimulated, ModePaper, ModeLive} {
 		for _, dryRun := range []bool{true, false} {
 			t.Run(fmt.Sprintf("mode=%s/dryRun=%v", mode, dryRun), func(t *testing.T) {
 				sandbox(t)
@@ -263,9 +263,9 @@ func TestGuardWrite_FourCellMatrix(t *testing.T) {
 
 				err := cfg.GuardWrite("submit buy 100 AAPL")
 
-				if mode == ModeLive && !dryRun {
+				if mode != ModeSimulated && !dryRun {
 					if err != nil {
-						t.Fatalf("the only open cell is live+dryRun=false, got %v", err)
+						t.Fatalf("the only open cells are live+dryRun=false or paper+dryRun=false, got %v", err)
 					}
 					return
 				}
@@ -303,7 +303,7 @@ func TestGuardWrite_EmptyActionIsNotABlockedError(t *testing.T) {
 func TestGuardWrite_RefusalMessages(t *testing.T) {
 	t.Run("dry run branch names the mode", func(t *testing.T) {
 		sandbox(t)
-		for _, mode := range []Mode{ModeSimulated, ModeLive} {
+		for _, mode := range []Mode{ModeSimulated, ModePaper, ModeLive} {
 			err := newTestConfig(mode, true).GuardWrite("submit buy 100 AAPL")
 			if err == nil {
 				t.Fatalf("mode=%s dryRun=true must block", mode)
@@ -334,7 +334,7 @@ func TestGuardWrite_RefusalMessages(t *testing.T) {
 		for _, want := range []string{
 			"mode is \"simulated\" but dry run is disabled",
 			"No order was sent",
-			"LONGPORT_MODE=live",
+			"LONGPORT_MODE=paper",
 		} {
 			if !strings.Contains(msg, want) {
 				t.Errorf("message is missing %q\n---\n%s", want, msg)
@@ -347,12 +347,12 @@ func TestGuardWrite_RefusalMessages(t *testing.T) {
 }
 
 // TestGuardWrite_UnknownModeIsBlocked asserts the fail-closed rule: an order is
-// allowed only when Mode is EXACTLY ModeLive. Every other value — the empty
+// allowed only when Mode is ModeLive or ModePaper. Every other value — the empty
 // zero value, a typo, a different case, an invented mode — blocks.
 //
 // This is a deliberate design decision, not an accident of the current inputs,
 // and it is asserted that way on purpose. The previous implementation refused
-// only ModeSimulated, so anything else ("", "LIVE", "paper") fell through to
+// only ModeSimulated, so anything else ("", "LIVE", "bogus") fell through to
 // "allow" and a hand-built or future Config could place a real order; that also
 // disagreed with WriteGuard.Unsatisfied in this same package, which has always
 // used the deny-unless-live form. If someone "simplifies" this back to
@@ -362,7 +362,7 @@ func TestGuardWrite_RefusalMessages(t *testing.T) {
 func TestGuardWrite_UnknownModeIsBlocked(t *testing.T) {
 	sandbox(t)
 	for _, mode := range []Mode{
-		Mode(""), Mode("live-ish"), Mode("LIVE"), Mode("Live"), Mode("paper"),
+		Mode(""), Mode("live-ish"), Mode("LIVE"), Mode("Live"),
 		Mode("simulated "), Mode(" live"), Mode("sandbox"),
 	} {
 		t.Run("mode="+fmt.Sprintf("%q", mode), func(t *testing.T) {
@@ -378,8 +378,8 @@ func TestGuardWrite_UnknownModeIsBlocked(t *testing.T) {
 			if !strings.Contains(err.Error(), fmt.Sprintf("%q", mode)) {
 				t.Errorf("message must quote the offending mode %q:\n%s", mode, err)
 			}
-			if !strings.Contains(err.Error(), "LONGPORT_MODE=live") {
-				t.Errorf("message must name the one value that opens the gate:\n%s", err)
+			if !strings.Contains(err.Error(), "LONGPORT_MODE=live") && !strings.Contains(err.Error(), "LONGPORT_MODE=paper") {
+				t.Errorf("message must name one of the two values that opens the gate:\n%s", err)
 			}
 		})
 	}
@@ -390,9 +390,19 @@ func TestGuardWrite_UnknownModeIsBlocked(t *testing.T) {
 func TestWriteGuard_UnsatisfiedAlreadyDeniesUnknownModes(t *testing.T) {
 	sandbox(t)
 	t.Setenv(DCAGuard.DryRunEnv, "0")
-	for _, mode := range []Mode{Mode(""), Mode("live-ish"), Mode("LIVE"), Mode("paper"), Mode("simulated ")} {
+	for _, mode := range []Mode{Mode(""), Mode("live-ish"), Mode("LIVE"), Mode("simulated ")} {
 		if err := DCAGuard.Check(newTestConfig(mode, false), true, "pause DCA plan 1"); err == nil {
-			t.Errorf("WriteGuard.Check must deny mode %q", mode)
+			t.Errorf("WriteGuard.Check must deny unknown mode %q", mode)
 		}
+	}
+}
+
+// TestWriteGuard_PaperModeIsAllowed is the inverse: paper mode must satisfy
+// the RequireLive guard, since a paper account cannot move real money.
+func TestWriteGuard_PaperModeIsAllowed(t *testing.T) {
+	sandbox(t)
+	t.Setenv(DCAGuard.DryRunEnv, "0")
+	if err := DCAGuard.Check(newTestConfig(ModePaper, false), true, "pause DCA plan 1"); err != nil {
+		t.Errorf("paper mode with dry run off must be allowed, got %v", err)
 	}
 }

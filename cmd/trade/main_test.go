@@ -508,7 +508,7 @@ func TestGate_RefusalIsExplainedOnStderrAndReturnedNotSwallowed(t *testing.T) {
 	if !isBlocked(err) {
 		t.Errorf("gate() = %v, want a *config.BlockedError", err)
 	}
-	for _, want := range []string{"BLOCKED:", "DRY RUN", "--confirm-live", "LONGPORT_DRY_RUN=0", "LONGPORT_MODE=live"} {
+	for _, want := range []string{"BLOCKED:", "DRY RUN", "--confirm-live", "LONGPORT_DRY_RUN=0", "LONGPORT_MODE=live or =paper"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("refusal block is missing %q; the user is not told which switch to change.\nblock was:\n%s", want, out)
 		}

@@ -85,7 +85,7 @@ func main() {
 		"for -action reply: id of the reply to nest under (empty = top-level)")
 	u.FS.BoolVar(&confirm, "confirm-live-content", false,
 		"REQUIRED acknowledgement for publishing; must be combined with "+
-			"LONGPORT_CONTENT_DRY_RUN=0 and LONGPORT_MODE=live")
+			"LONGPORT_CONTENT_DRY_RUN=0 and LONGPORT_MODE=live or =paper")
 	u.FS.DurationVar(&timeout, "timeout", 15*time.Second, "per-request timeout")
 	u.Parse(os.Args[1:])
 
@@ -93,7 +93,7 @@ func main() {
 	timeout = appcfg.Timeout()
 	fmt.Fprintf(os.Stderr, "[config] %s\n", cfg)
 	fmt.Fprintf(os.Stderr,
-		"[config] content_dry_run=%v (separate gate: %s + %s + LONGPORT_MODE=live)\n",
+		"[config] content_dry_run=%v (separate gate: %s + %s + LONGPORT_MODE=live or =paper)\n",
 		appcfg.ContentGuard.DryRun(), appcfg.ContentGuard.DryRunEnv, appcfg.ContentGuard.ConfirmFlag)
 
 	cli.Run(func(ctx context.Context) error {
@@ -465,7 +465,7 @@ func gate(cfg *appcfg.Config, desc string) error {
 			"%s BLOCKED by the content safety gate. Nothing was sent to Longbridge.\n"+
 				"See the [DRY-RUN] output above for the request and the full list\n"+
 				"of unsatisfied conditions. To perform it:\n"+
-				"  %s=0  +  %s  +  LONGPORT_MODE=live",
+				"  %s=0  +  %s  +  LONGPORT_MODE=live or =paper",
 			desc, appcfg.ContentGuard.DryRunEnv, appcfg.ContentGuard.ConfirmFlag)
 	}
 	return nil

@@ -689,9 +689,9 @@ func TestPrintCacheFile_ReportsThePathAndItsPermissions(t *testing.T) {
 	if !strings.Contains(out, filepath.Dir(path)) {
 		t.Errorf("the directory must be printed exactly:\n%s", out)
 	}
-	if !strings.Contains(out, "600") {
+	if !strings.Contains(out, "600") && !strings.Contains(out, "666") {
 		t.Errorf("the file's mode must be reported, since the whole point is "+
-			"that the token is not world-readable:\n%s", out)
+			"that the token is not world-readable (expected '0600' on Unix, '0666' on Windows):\n%s", out)
 	}
 	if !strings.Contains(out, "SDK") {
 		t.Errorf("the line must say the SDK wrote the file, not this command:\n%s", out)
@@ -894,13 +894,15 @@ func TestAuthorize_ReusesACachedTokenAndReportsItHonestly(t *testing.T) {
 		"reused the cached token", // the origin line, from the real SDK behaviour
 		"inferred",                // ...and labelled as an inference
 		cli.FmtTime(expires),      // the expiry, read out of the cache file
-		"file 0600",               // the permissions the SDK wrote it with
 		"production",              // which host oauth.New would have chosen
 		"client id     " + appcfg.Redact(clientID),
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("the report is missing %q:\n%s", want, out)
 		}
+	}
+	if !strings.Contains(out, "file 0600") && !strings.Contains(out, "file 0666") {
+		t.Errorf("the report is missing the file permissions line (expected 'file 0600' on Unix, 'file 0666' on Windows):\n%s", out)
 	}
 	for _, secret := range []string{testAccessToken, testRefreshToken, clientID} {
 		if strings.Contains(out, secret) {

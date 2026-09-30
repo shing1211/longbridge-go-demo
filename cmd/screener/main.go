@@ -37,6 +37,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -371,7 +372,7 @@ func printSearch(ctx context.Context, sc *screener.ScreenerContext, p *plan) err
 	if err != nil {
 		return fmt.Errorf("screener search: %w", err)
 	}
-	emit(res.Data)
+	emitSearch(res.Data)
 	fmt.Println("\nitems[].indicators[].key has the \"filter_\" prefix stripped by the SDK.")
 	return nil
 }
@@ -423,6 +424,97 @@ func clip(s string) string {
 	// preceded by a broken character.
 	head := strings.ToValidUTF8(s[:rawLimit], "")
 	return head + fmt.Sprintf("…(truncated, %d bytes total)", len(s))
+}
+
+// ------------------------------------------------------------------ search rendering
+
+type searchIndicator struct {
+	Key   string `json:"key"`
+	Name  string `json:"name"`
+	Unit  string `json:"unit"`
+	Value string `json:"value"`
+}
+
+type searchItem struct {
+	Symbol     string            `json:"symbol"`
+	Name       string            `json:"name"`
+	CounterID  string            `json:"counter_id"`
+	Indicators []searchIndicator `json:"indicators"`
+}
+
+type searchResponse struct {
+	Items []searchItem `json:"items"`
+	Total int           `json:"total"`
+}
+
+// emitSearch prints the search response as a typed table rather than raw JSON.
+func emitSearch(raw json.RawMessage) {
+	if len(raw) == 0 {
+		fmt.Println("   (empty response body)")
+		return
+	}
+	var resp searchResponse
+	if err := json.Unmarshal(raw, &resp); err != nil {
+		// If it doesn't decode as our struct, fall back to pretty-printed JSON.
+		fmt.Println(prettyJSON(raw))
+		fmt.Printf("(%d bytes of JSON, pretty-printed with sorted keys)\n", len(raw))
+		return
+	}
+	if len(resp.Items) == 0 {
+		fmt.Println("   (no items returned)")
+		fmt.Printf("total: %d\n", resp.Total)
+		return
+	}
+
+	// Collect all unique indicator keys across items to form table columns.
+	// Use an ordered slice of keys and a map for fast lookup.
+	keySet := make(map[string]struct{})
+	for _, item := range resp.Items {
+		for _, ind := range item.Indicators {
+			keySet[ind.Key] = struct{}{}
+		}
+	}
+	keys := make([]string, 0, len(keySet))
+	for k := range keySet {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+
+	// Print header.
+	// Symbol: 12 chars, Name: up to 40 chars, then one column per indicator key.
+	const symbolCol = 12
+	const nameCol = 40
+	fmt.Printf("%-*s %-*s", symbolCol, "SYMBOL", nameCol, "NAME")
+	for _, k := range keys {
+		fmt.Printf(" %s", k)
+	}
+	fmt.Println()
+
+	// Print each item as a row.
+	for _, item := range resp.Items {
+		// Build a map from key to value for O(1) lookup.
+		valMap := make(map[string]string, len(item.Indicators))
+		for _, ind := range item.Indicators {
+			valMap[ind.Key] = ind.Value
+		}
+
+		// Truncate name if needed.
+		name := item.Name
+		if len(name) > nameCol-2 {
+			name = name[:nameCol-3] + "…"
+		}
+		fmt.Printf("%-*s %-*s", symbolCol, item.Symbol, nameCol, name)
+		for _, k := range keys {
+			val := valMap[k]
+			if val == "" {
+				val = "-"
+			}
+			fmt.Printf(" %s", val)
+		}
+		fmt.Println()
+	}
+
+	fmt.Printf("\n%d items (total: %d)\n", len(resp.Items), resp.Total)
 }
 
 // -------------------------------------------------------------------- helpers

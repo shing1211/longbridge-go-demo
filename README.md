@@ -15,11 +15,10 @@ stops being true, in either direction. The normative statement is
 [SDK coverage](#sdk-coverage) for the command that verifies it, the per-type
 counts, the three reason words, and the caveat that it is a static check.
 
-> **Status: not yet tested against the live API.** See
-> [Honest status](#honest-status). Everything below was verified by building,
-> vetting, running the test suite, and running against the real Longbridge
-> endpoints with deliberately invalid credentials. No output in this README is
-> copied from a live session.
+> **Status: the write-path was verified end-to-end against a paper (simulated) account**
+> (order ID `1289784973955432448`). Read-path renderers were written from SDK
+> struct definitions and have not all been validated against a live API response.
+> See [Honest status](#honest-status).
 
 ---
 
@@ -170,13 +169,14 @@ instead is make your intent explicit and enforce the safety gate around it:
 
 | Var | Default | Meaning |
 | --- | --- | --- |
-| `LONGPORT_MODE` | `simulated` | Your *stated* account type. `simulated` or `live`. |
+| `LONGPORT_MODE` | `simulated` | Your *stated* account type. `simulated`, `paper` (simulated/trading account), or `live` (real money). |
 | `LONGPORT_DRY_RUN` | `1` | When on, no order write is possible. |
 
 If `LONGPORT_MODE=simulated`, writes stay blocked **even with dry run off**,
 so an accidental `LONGPORT_DRY_RUN=0` cannot trade your simulated money. That
 is the whole point of the extra switch: a typo in one variable is not enough to
-place a real order.
+place a real order. `LONGPORT_MODE=paper` allows write operations through to the
+paper trading endpoint; `LONGPORT_MODE=live` allows writes to the live endpoint.
 
 Note the different prefixes on purpose: `LONGBRIDGE_*` are the SDK's own
 variables, `LONGPORT_*` are this demo's. The SDK also still accepts
@@ -194,7 +194,7 @@ A write happens only when **all three** of these hold:
 
 1. `LONGPORT_DRY_RUN=0` (or `false`), and
 2. `--confirm-live` passed on the command line, and
-3. `LONGPORT_MODE=live`
+3. `LONGPORT_MODE=live` (or `=paper`)
 
 Otherwise the command prints the exact request it *would* have sent, prints
 why it was blocked, and exits **3** without opening a connection. Exit 3 is
@@ -223,6 +223,8 @@ No order was sent. Either restore LONGPORT_DRY_RUN=1, or set
 to state that these are real-money credentials.
 
 $ LONGPORT_DRY_RUN=0 LONGPORT_MODE=live go run ./cmd/trade ... --confirm-live
+# or, with a simulated account:
+$ LONGPORT_DRY_RUN=0 LONGPORT_MODE=paper go run ./cmd/trade ... --confirm-live
 error: creating trade context: ... httpStatus:401 code:401004 message:token invalid
 ```
 
@@ -282,7 +284,7 @@ switch:
 | --- | --- | --- | --- | --- | --- | --- |
 | Env switch (default `1`) | `LONGPORT_DRY_RUN` | `LONGPORT_WATCHLIST_DRY_RUN` | `LONGPORT_SHARELIST_DRY_RUN` | `LONGPORT_CONTENT_DRY_RUN` | `LONGPORT_DCA_DRY_RUN` | `LONGPORT_ALERT_DRY_RUN` |
 | Flag | `--confirm-live` | `--confirm` | `--confirm-live-sharelist` | `--confirm-live-content` | `--confirm-live-dca` | `--confirm-live-alert` |
-| Also requires | `LONGPORT_MODE=live` | — | `LONGPORT_MODE=live` | `LONGPORT_MODE=live` | `LONGPORT_MODE=live` | `LONGPORT_MODE=live` |
+| Also requires | `LONGPORT_MODE=live` (or `=paper`) | — | `LONGPORT_MODE=live` (or `=paper`) | `LONGPORT_MODE=live` (or `=paper`) | `LONGPORT_MODE=live` (or `=paper`) | `LONGPORT_MODE=live` (or `=paper`) |
 | Refusal exits | `3` | `3` | `3` | `3` | `3` | `3` |
 
 The four gates from `LONGPORT_SHARELIST_DRY_RUN` rightwards are all the same
@@ -1081,16 +1083,16 @@ go run ./cmd/sharelist -action detail -id 12345
 go run ./cmd/sharelist -action detail -id 12345 -stock-limit 50
 
 # writes — all three switches required
-LONGPORT_SHARELIST_DRY_RUN=0 LONGPORT_MODE=live \
+LONGPORT_SHARELIST_DRY_RUN=0 LONGPORT_MODE=paper \
   go run ./cmd/sharelist -action create -name tech -description "semis" \
     --confirm-live-sharelist
-LONGPORT_SHARELIST_DRY_RUN=0 LONGPORT_MODE=live \
+LONGPORT_SHARELIST_DRY_RUN=0 LONGPORT_MODE=paper \
   go run ./cmd/sharelist -action add    -id 12345 -symbols 700.HK,9988.HK --confirm-live-sharelist
-LONGPORT_SHARELIST_DRY_RUN=0 LONGPORT_MODE=live \
+LONGPORT_SHARELIST_DRY_RUN=0 LONGPORT_MODE=paper \
   go run ./cmd/sharelist -action sort   -id 12345 -symbols 9988.HK,700.HK  --confirm-live-sharelist
-LONGPORT_SHARELIST_DRY_RUN=0 LONGPORT_MODE=live \
+LONGPORT_SHARELIST_DRY_RUN=0 LONGPORT_MODE=paper \
   go run ./cmd/sharelist -action remove -id 12345 -symbols 700.HK          --confirm-live-sharelist
-LONGPORT_SHARELIST_DRY_RUN=0 LONGPORT_MODE=live \
+LONGPORT_SHARELIST_DRY_RUN=0 LONGPORT_MODE=paper \
   go run ./cmd/sharelist -action delete -id 12345 --confirm-live-sharelist
 ```
 
@@ -1187,11 +1189,11 @@ go run ./cmd/content -action replies -reply-topic 12345 -page 2
 go run ./cmd/content -action mine -topic-type article
 
 # writes — all three switches required
-LONGPORT_CONTENT_DRY_RUN=0 LONGPORT_MODE=live \
+LONGPORT_CONTENT_DRY_RUN=0 LONGPORT_MODE=paper \
   go run ./cmd/content -action create-topic -topic-type article \
     -title "700.HK earnings" -body "Markdown body" -tickers 700.HK \
     --confirm-live-content
-LONGPORT_CONTENT_DRY_RUN=0 LONGPORT_MODE=live \
+LONGPORT_CONTENT_DRY_RUN=0 LONGPORT_MODE=paper \
   go run ./cmd/content -action reply -reply-topic 12345 -body "Agreed." \
     --confirm-live-content
 ```
@@ -1490,14 +1492,14 @@ go run ./cmd/dca -action check-support -symbol 700.HK
 go run ./cmd/dca -action calc-date -symbol 700.HK -frequency monthly -day-of-month 15
 
 # Writes — all three switches required.
-LONGPORT_DCA_DRY_RUN=0 LONGPORT_MODE=live \
+LONGPORT_DCA_DRY_RUN=0 LONGPORT_MODE=paper \
   go run ./cmd/dca -action create -symbol 700.HK -amount 1000 \
     -frequency monthly -day-of-month 15 --confirm-live-dca
-LONGPORT_DCA_DRY_RUN=0 LONGPORT_MODE=live \
+LONGPORT_DCA_DRY_RUN=0 LONGPORT_MODE=paper \
   go run ./cmd/dca -action update -plan-id <id> -amount 2000 --confirm-live-dca
-LONGPORT_DCA_DRY_RUN=0 LONGPORT_MODE=live \
+LONGPORT_DCA_DRY_RUN=0 LONGPORT_MODE=paper \
   go run ./cmd/dca -action pause -plan-id <id> --confirm-live-dca
-LONGPORT_DCA_DRY_RUN=0 LONGPORT_MODE=live \
+LONGPORT_DCA_DRY_RUN=0 LONGPORT_MODE=paper \
   go run ./cmd/dca -action stop  -plan-id <id> --confirm-live-dca
 ```
 
@@ -1595,7 +1597,7 @@ knowing before you use it:
 ```console
 $ go run ./cmd/dca -action update -plan-id 1 -amount 2000
 [config] mode=simulated … dry_run=true …
-[config] dca_dry_run=true (dedicated gate: LONGPORT_DCA_DRY_RUN + --confirm-live-dca + LONGPORT_MODE=live)
+[config] dca_dry_run=true (dedicated gate: LONGPORT_DCA_DRY_RUN + --confirm-live-dca + LONGPORT_MODE=live or =paper)
 
 [DRY-RUN] request that would be sent:
 [DRY-RUN]   allow_margin       -
@@ -1680,12 +1682,12 @@ gate is already open and a request was going out regardless.
 go run ./cmd/alert -action list
 
 # Writes — all three switches required.
-LONGPORT_ALERT_DRY_RUN=0 LONGPORT_MODE=live \
+LONGPORT_ALERT_DRY_RUN=0 LONGPORT_MODE=paper \
   go run ./cmd/alert -action add -symbol 700.HK -condition price-rise -value 600 \
     --confirm-live-alert
-LONGPORT_ALERT_DRY_RUN=0 LONGPORT_MODE=live \
+LONGPORT_ALERT_DRY_RUN=0 LONGPORT_MODE=paper \
   go run ./cmd/alert -action update -id <id> -enabled=false --confirm-live-alert
-LONGPORT_ALERT_DRY_RUN=0 LONGPORT_MODE=live \
+LONGPORT_ALERT_DRY_RUN=0 LONGPORT_MODE=paper \
   go run ./cmd/alert -action delete -id <id> --confirm-live-alert
 ```
 
@@ -2020,13 +2022,13 @@ reported as a wrong format even when the file does not exist.
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
-| `LONGPORT_DRY_RUN` | `1` | Order gate. Must be `0` **and** `--confirm-live` **and** `LONGPORT_MODE=live`. |
-| `LONGPORT_MODE` | `simulated` | `simulated` or `live`. |
+| `LONGPORT_DRY_RUN` | `1` | Order gate. Must be `0` **and** `--confirm-live` **and** `LONGPORT_MODE=live` (or `=paper`). |
+| `LONGPORT_MODE` | `simulated` | `simulated`, `paper` or `live`. |
 | `LONGPORT_WATCHLIST_DRY_RUN` | `1` | Watchlist gate. Must be `0` **and** `--confirm`. |
-| `LONGPORT_SHARELIST_DRY_RUN` | `1` | Sharelist gate. Must be `0` **and** `--confirm-live-sharelist` **and** `LONGPORT_MODE=live`. |
-| `LONGPORT_CONTENT_DRY_RUN` | `1` | Content gate. Must be `0` **and** `--confirm-live-content` **and** `LONGPORT_MODE=live`. |
-| `LONGPORT_DCA_DRY_RUN` | `1` | DCA gate. Must be `0` **and** `--confirm-live-dca` **and** `LONGPORT_MODE=live`. |
-| `LONGPORT_ALERT_DRY_RUN` | `1` | Price-alert gate. Must be `0` **and** `--confirm-live-alert` **and** `LONGPORT_MODE=live`. |
+| `LONGPORT_SHARELIST_DRY_RUN` | `1` | Sharelist gate. Must be `0` **and** `--confirm-live-sharelist` **and** `LONGPORT_MODE=live` (or `=paper`). |
+| `LONGPORT_CONTENT_DRY_RUN` | `1` | Content gate. Must be `0` **and** `--confirm-live-content` **and** `LONGPORT_MODE=live` (or `=paper`). |
+| `LONGPORT_DCA_DRY_RUN` | `1` | DCA gate. Must be `0` **and** `--confirm-live-dca` **and** `LONGPORT_MODE=live` (or `=paper`). |
+| `LONGPORT_ALERT_DRY_RUN` | `1` | Price-alert gate. Must be `0` **and** `--confirm-live-alert` **and** `LONGPORT_MODE=live` (or `=paper`). |
 
 All six default to `1`, all six are checked in `config.Load` via
 `declaredGuards()`, so an **unparseable** value (`LONGPORT_DCA_DRY_RUN=maybe`) is
@@ -2290,10 +2292,10 @@ quoted verbatim:
 ```console
 $ make coverage-check
 sdk coverage: 184/206 exported methods referenced from cmd/
-sdk allow-list: 25 of 206 methods justified, by reason:
-  internal     20
+sdk allow-list: 22 of 206 methods justified, by reason:
+  internal     19
+  not-used     2
   unimportable 1
-  not-used     4
 ```
 
 You can also check it yourself without trusting either. **One pattern covers the
@@ -2560,10 +2562,17 @@ pinned count now guards against.
 
 ## Honest status
 
-**This project has never been run against a working Longbridge account.** It
-was not built with an access token available, and no order has been placed. The
-account the user has is a *simulated* one, but no access token for it was
-supplied, so nothing in this repo has ever been validated against a live API.
+**The write-path was verified end-to-end against a paper (simulated) trading account.**
+An order was submitted with `LONGPORT_MODE=paper` and accepted with order ID
+`1289784973955432448`. This confirms the write-path wiring is live — the
+SDK, signing, network path and paper trading endpoint are all genuinely connected.
+
+No successful response from a **live** (real-money) account has been observed in
+this project. Read-path renderers were written from the SDK's struct definitions
+and have not all been validated against a live API response. Two read-path
+renderers (`screener -action search` and `market -sections rank-categories`)
+that previously produced untyped raw JSON have since been confirmed against the
+paper account and replaced with typed table renderers.
 
 What *was* verified by execution:
 
@@ -2571,8 +2580,10 @@ What *was* verified by execution:
 - `go build ./...` and `go vet ./...` both exit 0.
 - `make verify` is green: `fmt-check`, `vet`, `test` (`go test -race ./...`),
   `build`, and `coverage-check`.
-- The test suite passes: **469** test functions across **16** packages,
-  **2 650** passing cases including subtests, one helper-process test skipped.
+- The test suite passes: **551** test functions across **17** packages,
+  **2 894** cases executed including subtests, two tests skipped
+  (`TestHelperProcess` in `internal/cli` and `TestTryOpenBrowser_PassesTheURLToALauncherItFinds`
+  in `cmd/auth`).
   See [Development](#development).
 - The suite is green under `-race`, `-count=2` and `-shuffle=on`, under a
   deliberately hostile `env -i` environment, with poisoned
@@ -2713,35 +2724,37 @@ gateway failed with `dial tcp 127.0.0.1:1: connect: connection refused` — so
 the override was demonstrably in effect and the refusals demonstrably never
 touched it.
 
-`cmd/screener` is the newest command, so it is worth being precise about exactly
-how far it has been taken. All five actions were run against the real API with a
-deliberately invalid token and each returns the same real 401 as every other
-command — so the wiring, the flag validation, the mode banner and the request
-construction are confirmed. What is **not** confirmed is anything about a
-successful response. **Every one of the five responses is `json.RawMessage`** in
-the SDK (`screener/types.go` defines no response structs at all), so the
-renderer is a deterministic-key-order pretty-printer with a 4 KB clip, and its
-output was **written from the SDK's struct definitions alone and never observed
-from a live API**. The three behaviours documented under
+`cmd/screener` is the newest command. All five actions were run against the real
+API with a deliberately invalid token and each returns the same real 401 as every
+other command — so the wiring, the flag validation, the mode banner and the
+request construction are confirmed. Four of the five responses remain
+`json.RawMessage` in the SDK (`screener/types.go` defines no response structs
+for those), so their renderers are deterministic-key-order pretty-printers with a
+4 KB clip, written from the SDK's struct definitions alone. `screener -action
+search` was **confirmed against the paper account** and replaced with a typed
+table renderer that maps `symbol`, `name`, `counter_id` and the `indicators`
+array. The three behaviours documented under
 [`screener`](#screener--read-only-stock-screener) — the two-request search, the
 0-indexed page, the rejected `-strategy-id 0` — were read out of
 `screener/context.go`, not observed. In particular the two-request mode A could
 not be observed end to end, because the first `GET` is rejected by the dummy
 token before the second `POST` is ever issued; the claim rests on the SDK source.
 
-What is **not** verified: the shape of successful responses, field-by-field
-rendering, column widths, and whether any live order is accepted. No command
-here has ever run against a working access token. The output formatting was
-written against the v0.25.2 type definitions in the module cache, so it should
-be correct, but "should be" is not "was observed". Expect to adjust column
-widths once real data flows.
+What is **not** verified: the shape of successful responses from the live API,
+field-by-field rendering for most commands, column widths, and whether a live
+account order is accepted. Read-path output formatting was written against the
+v0.25.2 type definitions in the module cache, so it should be correct, but
+"should be" is not "was observed". The paper account was used to confirm two
+previously untyped renderers (`screener -action search` and `market -sections
+rank-categories`); the other read-path renderers remain from-struct-definitions
+only and may need adjustment once tested against a live account.
 
-This matters most for the newest sections, whose types are the least
-documented: the A/H premium klines, the broker-holding change quadruples, the
-rank-category JSON and the portfolio P&L credit/debit/fee lines are all
-rendered from the struct definitions alone. `RankCategories` in particular
-returns an opaque `json.RawMessage`, so its rendering is a pretty-printer and
-not a field mapping at all.
+This matters most for the sections whose types are the least documented: the
+A/H premium klines, the broker-holding change quadruples, the portfolio P&L
+credit/debit/fee lines, and the four screener actions (`indicators`,
+`recommend`, `mine`, `strategy`) whose responses are `json.RawMessage` upstream.
+`market -sections rank-categories` was **confirmed against the paper account**
+and replaced with a typed two-level table renderer.
 
 `cmd/fundamentals` is the largest such case, and it is worth being blunt about
 what "covered" means there. Every one of the 32 fundamental methods, both asset
@@ -2832,8 +2845,8 @@ is no longer true, and it was never true of the parts that matter most. See
 
 ## Development
 
-There is a test suite, and it now covers **16 of the 18 packages in the repo** —
-`internal/config`, `internal/cli`, the `test/` package, and thirteen `cmd/*`
+There is a test suite, and it now covers **17 of the 19 packages in the repo** —
+`internal/config`, `internal/cli`, the `test/` package, and fourteen `cmd/*`
 binaries. Only `cmd/portfolio` and `cmd/watch` have no test file.
 
 ```bash
@@ -2869,10 +2882,10 @@ ok  	github.com/shing1211/longbridge-go-demo/test	0.051s
   …
   build auth
 sdk coverage: 184/206 exported methods referenced from cmd/
-sdk allow-list: 25 of 206 methods justified, by reason:
-  internal     20
+sdk allow-list: 22 of 206 methods justified, by reason:
+  internal     19
+  not-used     2
   unimportable 1
-  not-used     4
 ```
 
 ### The numbers
@@ -2896,24 +2909,25 @@ sdk allow-list: 25 of 206 methods justified, by reason:
 | `cmd/reference` | 16 | 100 | 8.6% |
 | `cmd/quote` | 8 | 60 | 12.0% |
 | `test` | 3 | 19 | *no statements* |
-| **Total** | **512** | **2 761** (2 760 pass + 1 skip) | — |
+| **Total** | **551** | **2 894** (2 892 pass + 2 skip) | — |
 
 Sorted by test functions. `cmd/portfolio` and `cmd/watch` have no test file and
 so appear in no row; `go test -cover ./...` reports them at 0.0%. The `test`
 package holds no production code — it exists to read the other packages' source.
 
 "Test functions" counts `func TestXxx` declarations; "cases executed" counts
-every test case the runner actually entered, subtests included. The one skip is
-`TestHelperProcess` in `internal/cli`, a subprocess helper that is only
-meaningful when re-executed by its parent. To reproduce the totals:
+every test case the runner actually entered, subtests included. Two skips are
+present: `TestHelperProcess` in `internal/cli` is a subprocess helper that is only
+meaningful when re-executed by its parent, and `TestTryOpenBrowser_PassesTheURLToALauncherItFinds`
+in `cmd/auth` is skipped when no browser launcher is available on the host. To reproduce the totals:
 
 ```console
 $ go test -count=1 -v ./... 2>&1 | grep -cE '^\s*--- PASS'
-2760
+2892
 $ go test -count=1 -v ./... 2>&1 | grep -cE '^\s*--- SKIP'
-1
+2
 $ grep -rhE '^func Test' --include='*_test.go' . | wc -l
-512
+551
 $ go test -cover ./... | wc -l
 19
 $ make build && ls bin | wc -l

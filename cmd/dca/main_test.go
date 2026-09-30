@@ -1433,7 +1433,7 @@ func TestGate_RefusalIsExplainedOnStderrAndReturnsABlockedError(t *testing.T) {
 	}
 	for _, want := range []string{
 		"[DRY-RUN] BLOCKED:", "create a DCA plan for 700.HK",
-		"LONGPORT_DCA_DRY_RUN", "--confirm-live-dca", "LONGPORT_MODE=live",
+		"LONGPORT_DCA_DRY_RUN", "--confirm-live-dca", "LONGPORT_MODE=live or =paper",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("refusal block is missing %q.\nblock was:\n%s", want, out)

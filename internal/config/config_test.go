@@ -289,6 +289,15 @@ func TestConfigString_IncludesTheSafeFields(t *testing.T) {
 	if msg := live.String(); strings.Contains(msg, "SIMULATED") {
 		t.Errorf("live mode must not print the simulated warning:\n%s", msg)
 	}
+
+	paper := newTestConfig(ModePaper, false)
+	paper.AppKey = "abcdefghijklmnop"
+	if msg := paper.String(); strings.Contains(msg, "SIMULATED") {
+		t.Errorf("paper mode must not print the simulated warning:\n%s", msg)
+	}
+	if msg := paper.String(); !strings.Contains(msg, "PAPER") {
+		t.Errorf("paper mode should print the paper annotation:\n%s", msg)
+	}
 }
 
 func TestConfigString_EndpointFallbacks(t *testing.T) {
@@ -493,7 +502,7 @@ func TestLoadModeAndDryRun(t *testing.T) {
 		{name: "empty mode is the default", mode: "", modeSet: true, wantMode: ModeSimulated, wantDry: true},
 		{name: "simulated", mode: "simulated", modeSet: true, wantMode: ModeSimulated, wantDry: true},
 		{name: "sim is accepted", mode: "sim", modeSet: true, wantMode: ModeSimulated, wantDry: true},
-		{name: "paper is accepted", mode: "paper", modeSet: true, wantMode: ModeSimulated, wantDry: true},
+		{name: "paper is accepted", mode: "paper", modeSet: true, wantMode: ModePaper, wantDry: true},
 		{name: "mode is case insensitive", mode: "SiMuLaTeD", modeSet: true, wantMode: ModeSimulated, wantDry: true},
 		{name: "mode is trimmed", mode: "  live  ", modeSet: true, wantMode: ModeLive, wantDry: true},
 		{name: "live", mode: "live", modeSet: true, wantMode: ModeLive, wantDry: true},

@@ -4,11 +4,13 @@
 // SAFETY CONTRACT — read before touching any write path:
 //
 //   - The default is DRY RUN. Nothing is sent to the exchange.
-//   - A write happens only when BOTH of these are true:
+//   - A write happens only when ALL THREE of these are true:
 //     LONGPORT_DRY_RUN=0   (or false)
 //     --confirm-live       passed on the command line
-//   - LONGPORT_MODE must also be "live", so a simulated account can never
-//     receive an order even if dry run is switched off by accident.
+//     LONGPORT_MODE=live or =paper
+//   - With LONGPORT_MODE=simulated (the default), a write is blocked even if
+//     dry run is switched off by accident. Set =paper when running against a
+//     simulated account, or =live when running against a funded account.
 //   - Every write is passed through Config.GuardWrite immediately before the
 //     SDK call, and the dry-run path prints the exact request it would send.
 //
@@ -403,7 +405,7 @@ func guard(cfg *appcfg.Config, confirmed bool, action string) error {
 		return appcfg.Blockedf(
 			"missing --confirm-live\n" +
 				"Pass --confirm-live together with LONGPORT_DRY_RUN=0 and\n" +
-				"LONGPORT_MODE=live. All three are required.")
+				"LONGPORT_MODE=live or =paper. All three are required.")
 	}
 	return cfg.GuardWrite(action)
 }

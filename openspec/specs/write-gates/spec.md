@@ -6,9 +6,9 @@ Six kinds of mutation are reachable from this project's binaries — order place
 
 ## Requirements
 
-### Requirement: The order gate requires dry run off, an explicit flag, and live mode
+### Requirement: The order gate requires dry run off, an explicit flag, and live or paper mode
 
-Order writes SHALL be sent only when `LONGPORT_DRY_RUN=0` (or `false`), `--confirm-live` is passed, and `LONGPORT_MODE=live`. All three are required and none alone is sufficient. A refusal SHALL exit `3`.
+Order writes SHALL be sent only when `LONGPORT_DRY_RUN=0` (or `false`), `--confirm-live` is passed, and `LONGPORT_MODE` is `live` or `paper`. All three are required and none alone is sufficient. A refusal SHALL exit `3`.
 
 #### Scenario: The default refuses an order write
 
@@ -25,14 +25,19 @@ Order writes SHALL be sent only when `LONGPORT_DRY_RUN=0` (or `false`), `--confi
 - **WHEN** `LONGPORT_DRY_RUN=0` is set while `--confirm-live` is absent
 - **THEN** the write is refused, the process exits `3`, and the message names `--confirm-live`
 
-#### Scenario: Both switches without live mode still refuses
+#### Scenario: Both switches without live or paper mode still refuses
 
-- **WHEN** `LONGPORT_DRY_RUN=0` and `--confirm-live` are both set but `LONGPORT_MODE` is not `live`
-- **THEN** the write is refused, the process exits `3`, and the message names `LONGPORT_MODE=live`
+- **WHEN** `LONGPORT_DRY_RUN=0` and `--confirm-live` are both set but `LONGPORT_MODE` is not `live` or `paper`
+- **THEN** the write is refused, the process exits `3`, and the message names `LONGPORT_MODE=live or =paper`
+
+#### Scenario: Both switches with paper mode opens the gate
+
+- **WHEN** `LONGPORT_DRY_RUN=0`, `--confirm-live` and `LONGPORT_MODE=paper` are all in effect
+- **THEN** the gate is open and the write is authorised (paper account cannot move real money)
 
 #### Scenario: All three switches open the gate
 
-- **WHEN** `LONGPORT_DRY_RUN=0`, `--confirm-live` and `LONGPORT_MODE=live` are all in effect
+- **WHEN** `LONGPORT_DRY_RUN=0`, `--confirm-live` and `LONGPORT_MODE=live or =paper` are all in effect
 - **THEN** the gate is open and the write is authorised
 
 #### Scenario: A refused order write creates no client
@@ -74,9 +79,9 @@ Watchlist group writes SHALL be sent only when `LONGPORT_WATCHLIST_DRY_RUN=0` (o
 - **WHEN** `-action list` is run with `LONGPORT_WATCHLIST_DRY_RUN` unset, `1`, `0` or `false`, and with or without `--confirm`
 - **THEN** the read proceeds and reports the saved groups as usual, no refusal is printed, and the process does not exit `3`
 
-### Requirement: The recurring investment gate requires dry run off, an explicit flag, and live mode
+### Requirement: The recurring investment gate requires dry run off, an explicit flag, and live or paper mode
 
-Recurring investment plan writes SHALL be sent only when `LONGPORT_DCA_DRY_RUN=0` (or `false`), `--confirm-live-dca` is passed, and `LONGPORT_MODE=live`. A refusal SHALL exit `3`.
+Recurring investment plan writes SHALL be sent only when `LONGPORT_DCA_DRY_RUN=0` (or `false`), `--confirm-live-dca` is passed, and `LONGPORT_MODE` is `live` or `paper`. A refusal SHALL exit `3`.
 
 #### Scenario: The default refuses a plan write
 
@@ -93,19 +98,24 @@ Recurring investment plan writes SHALL be sent only when `LONGPORT_DCA_DRY_RUN=0
 - **WHEN** `LONGPORT_DCA_DRY_RUN=0` is set while `--confirm-live-dca` is absent
 - **THEN** the write is refused, the process exits `3`, and the message names `--confirm-live-dca`
 
-#### Scenario: Both switches without live mode still refuses
+#### Scenario: Both switches without live or paper mode still refuses
 
-- **WHEN** `LONGPORT_DCA_DRY_RUN=0` and `--confirm-live-dca` are both set but `LONGPORT_MODE` is not `live`
-- **THEN** the write is refused, the process exits `3`, and the message names `LONGPORT_MODE=live`
+- **WHEN** `LONGPORT_DCA_DRY_RUN=0` and `--confirm-live-dca` are both set but `LONGPORT_MODE` is not `live` or `paper`
+- **THEN** the write is refused, the process exits `3`, and the message names `LONGPORT_MODE=live or =paper`
+
+#### Scenario: Both switches with paper mode opens the gate
+
+- **WHEN** `LONGPORT_DCA_DRY_RUN=0`, `--confirm-live-dca` and `LONGPORT_MODE=paper` are all in effect
+- **THEN** the gate is open and the write is authorised (paper account cannot move real money)
 
 #### Scenario: All three switches open the gate
 
 - **WHEN** `LONGPORT_DCA_DRY_RUN=0`, `--confirm-live-dca` and `LONGPORT_MODE=live` are all in effect
 - **THEN** the gate is open and the write is authorised
 
-### Requirement: The price alert gate requires dry run off, an explicit flag, and live mode
+### Requirement: The price alert gate requires dry run off, an explicit flag, and live or paper mode
 
-Price alert writes SHALL be sent only when `LONGPORT_ALERT_DRY_RUN=0` (or `false`), `--confirm-live-alert` is passed, and `LONGPORT_MODE=live`. A refusal SHALL exit `3`.
+Price alert writes SHALL be sent only when `LONGPORT_ALERT_DRY_RUN=0` (or `false`), `--confirm-live-alert` is passed, and `LONGPORT_MODE` is `live` or `paper`. A refusal SHALL exit `3`.
 
 #### Scenario: The default refuses an alert write
 
@@ -122,19 +132,24 @@ Price alert writes SHALL be sent only when `LONGPORT_ALERT_DRY_RUN=0` (or `false
 - **WHEN** `LONGPORT_ALERT_DRY_RUN=0` is set while `--confirm-live-alert` is absent
 - **THEN** the write is refused, the process exits `3`, and the message names `--confirm-live-alert`
 
-#### Scenario: Both switches without live mode still refuses
+#### Scenario: Both switches without live or paper mode still refuses
 
-- **WHEN** `LONGPORT_ALERT_DRY_RUN=0` and `--confirm-live-alert` are both set but `LONGPORT_MODE` is not `live`
-- **THEN** the write is refused, the process exits `3`, and the message names `LONGPORT_MODE=live`
+- **WHEN** `LONGPORT_ALERT_DRY_RUN=0` and `--confirm-live-alert` are both set but `LONGPORT_MODE` is not `live` or `paper`
+- **THEN** the write is refused, the process exits `3`, and the message names `LONGPORT_MODE=live or =paper`
+
+#### Scenario: Both switches with paper mode opens the gate
+
+- **WHEN** `LONGPORT_ALERT_DRY_RUN=0`, `--confirm-live-alert` and `LONGPORT_MODE=paper` are all in effect
+- **THEN** the gate is open and the write is authorised
 
 #### Scenario: All three switches open the gate
 
 - **WHEN** `LONGPORT_ALERT_DRY_RUN=0`, `--confirm-live-alert` and `LONGPORT_MODE=live` are all in effect
 - **THEN** the gate is open and the write is authorised
 
-### Requirement: The share list gate requires dry run off, an explicit flag, and live mode
+### Requirement: The share list gate requires dry run off, an explicit flag, and live or paper mode
 
-Share list writes SHALL be sent only when `LONGPORT_SHARELIST_DRY_RUN=0` (or `false`), `--confirm-live-sharelist` is passed, and `LONGPORT_MODE=live`. A refusal SHALL exit `3`.
+Share list writes SHALL be sent only when `LONGPORT_SHARELIST_DRY_RUN=0` (or `false`), `--confirm-live-sharelist` is passed, and `LONGPORT_MODE` is `live` or `paper`. A refusal SHALL exit `3`.
 
 #### Scenario: The default refuses a share list write
 
@@ -151,19 +166,24 @@ Share list writes SHALL be sent only when `LONGPORT_SHARELIST_DRY_RUN=0` (or `fa
 - **WHEN** `LONGPORT_SHARELIST_DRY_RUN=0` is set while `--confirm-live-sharelist` is absent
 - **THEN** the write is refused, the process exits `3`, and the message names `--confirm-live-sharelist`
 
-#### Scenario: Both switches without live mode still refuses
+#### Scenario: Both switches without live or paper mode still refuses
 
-- **WHEN** `LONGPORT_SHARELIST_DRY_RUN=0` and `--confirm-live-sharelist` are both set but `LONGPORT_MODE` is not `live`
-- **THEN** the write is refused, the process exits `3`, and the message names `LONGPORT_MODE=live`
+- **WHEN** `LONGPORT_SHARELIST_DRY_RUN=0` and `--confirm-live-sharelist` are both set but `LONGPORT_MODE` is not `live` or `paper`
+- **THEN** the write is refused, the process exits `3`, and the message names `LONGPORT_MODE=live or =paper`
+
+#### Scenario: Both switches with paper mode opens the gate
+
+- **WHEN** `LONGPORT_SHARELIST_DRY_RUN=0`, `--confirm-live-sharelist` and `LONGPORT_MODE=paper` are all in effect
+- **THEN** the gate is open and the write is authorised
 
 #### Scenario: All three switches open the gate
 
 - **WHEN** `LONGPORT_SHARELIST_DRY_RUN=0`, `--confirm-live-sharelist` and `LONGPORT_MODE=live` are all in effect
 - **THEN** the gate is open and the write is authorised
 
-### Requirement: The content publishing gate requires dry run off, an explicit flag, and live mode
+### Requirement: The content publishing gate requires dry run off, an explicit flag, and live or paper mode
 
-Content publishing SHALL be sent only when `LONGPORT_CONTENT_DRY_RUN=0` (or `false`), `--confirm-live-content` is passed, and `LONGPORT_MODE=live`. A refusal SHALL exit `3`.
+Content publishing SHALL be sent only when `LONGPORT_CONTENT_DRY_RUN=0` (or `false`), `--confirm-live-content` is passed, and `LONGPORT_MODE` is `live` or `paper`. A refusal SHALL exit `3`.
 
 #### Scenario: The default refuses a publish
 
@@ -180,10 +200,15 @@ Content publishing SHALL be sent only when `LONGPORT_CONTENT_DRY_RUN=0` (or `fal
 - **WHEN** `LONGPORT_CONTENT_DRY_RUN=0` is set while `--confirm-live-content` is absent
 - **THEN** the write is refused, the process exits `3`, and the message names `--confirm-live-content`
 
-#### Scenario: Both switches without live mode still refuses
+#### Scenario: Both switches without live or paper mode still refuses
 
-- **WHEN** `LONGPORT_CONTENT_DRY_RUN=0` and `--confirm-live-content` are both set but `LONGPORT_MODE` is not `live`
-- **THEN** the write is refused, the process exits `3`, and the message names `LONGPORT_MODE=live`
+- **WHEN** `LONGPORT_CONTENT_DRY_RUN=0` and `--confirm-live-content` are both set but `LONGPORT_MODE` is not `live` or `paper`
+- **THEN** the write is refused, the process exits `3`, and the message names `LONGPORT_MODE=live or =paper`
+
+#### Scenario: Both switches with paper mode opens the gate
+
+- **WHEN** `LONGPORT_CONTENT_DRY_RUN=0`, `--confirm-live-content` and `LONGPORT_MODE=paper` are all in effect
+- **THEN** the gate is open and the write is authorised
 
 #### Scenario: All three switches open the gate
 

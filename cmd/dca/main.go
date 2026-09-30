@@ -121,7 +121,7 @@ func main() {
 	cfg := u.Load()
 	timeout = appcfg.Timeout()
 	fmt.Fprintf(os.Stderr, "[config] %s\n", cfg)
-	fmt.Fprintf(os.Stderr, "[config] dca_dry_run=%v (dedicated gate: %s + %s + LONGPORT_MODE=live)\n",
+	fmt.Fprintf(os.Stderr, "[config] dca_dry_run=%v (dedicated gate: %s + %s + LONGPORT_MODE=live or =paper)\n",
 		appcfg.DCAGuard.DryRun(), appcfg.DCAGuard.DryRunEnv, appcfg.DCAGuard.ConfirmFlag)
 	fmt.Fprintf(os.Stderr, "[config] read-only actions: list, history, stats, check-support, calc-date\n")
 
@@ -209,7 +209,7 @@ func registerFlags(u *cli.Usage) {
 	u.FS.IntVar(&limit, "limit", 20, "for history: max records")
 	u.FS.IntVar(&page, "page", 1, "for history: page index, 1-based")
 	u.FS.BoolVar(&confirmLiveDCA, "confirm-live-dca", false,
-		"REQUIRED for any write; must be combined with LONGPORT_DCA_DRY_RUN=0 and LONGPORT_MODE=live")
+		"REQUIRED for any write; must be combined with LONGPORT_DCA_DRY_RUN=0 and LONGPORT_MODE=live or =paper")
 	u.FS.DurationVar(&timeout, "timeout", 15*time.Second, "per-request timeout")
 }
 
@@ -626,7 +626,7 @@ func gate(cfg *appcfg.Config, action string) error {
 			"%s BLOCKED by the DCA safety gate. Nothing was sent to Longbridge.\n"+
 				"See the [DRY-RUN] output above for the request and the full list\n"+
 				"of unsatisfied conditions. To perform it:\n"+
-				"  %s=0  +  %s  +  LONGPORT_MODE=live",
+				"  %s=0  +  %s  +  LONGPORT_MODE=live or =paper",
 			action, appcfg.DCAGuard.DryRunEnv, appcfg.DCAGuard.ConfirmFlag)
 	}
 	return nil

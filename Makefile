@@ -234,6 +234,10 @@ verify: fmt-check vet test build coverage-check ## Everything CI should run
 run-quote: ## go run ./cmd/quote
 	$(GO) run ./cmd/quote
 
+.PHONY: run-trade
+run-trade: ## go run ./cmd/trade
+	$(GO) run ./cmd/trade
+
 .PHONY: run-market
 run-market: ## go run ./cmd/market
 	$(GO) run ./cmd/market

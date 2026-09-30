@@ -7,7 +7,7 @@
 // The one exception is -action withdraw, which is a WRITE: it maps to the SDK's
 // WithdrawOrder (an alias of CancelOrder). It therefore goes through the same
 // three-way order gate as cmd/trade — dry run, --confirm-live and
-// LONGPORT_MODE=live all required — and it is included here only so the demo
+// LONGPORT_MODE=live or =paper all required — and it is included here only so the demo
 // covers the SDK method. The trade context is created lazily so a dry run never
 // opens a websocket.
 package main
@@ -58,7 +58,7 @@ func main() {
 	u.FS.Int64Var(&page, "page", 0, "cash-flow page index (0 = first)")
 	u.FS.Int64Var(&pageSize, "size", 50, "cash-flow page size")
 	u.FS.BoolVar(&confirmLive, "confirm-live", false,
-		"REQUIRED acknowledgement for -action withdraw; must be combined with LONGPORT_DRY_RUN=0 and LONGPORT_MODE=live")
+		"REQUIRED acknowledgement for -action withdraw; must be combined with LONGPORT_DRY_RUN=0 and LONGPORT_MODE=live or =paper")
 	u.FS.DurationVar(&timeout, "timeout", 15*time.Second, "per-request timeout")
 	u.Parse(os.Args[1:])
 
