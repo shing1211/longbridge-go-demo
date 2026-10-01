@@ -1,6 +1,10 @@
 # Real credentials — never commit.
 .env
 .env.*
+.env.bak
+.env.*.bak
+.env.local
+.env.*.local
 !.env.example
 
 # Local config with real values. Only config.yaml and config.local.yaml are
