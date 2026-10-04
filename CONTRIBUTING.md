@@ -5,7 +5,7 @@
 All changes travel through GitHub PRs:
 
 1. **Create an issue first** — before any branch or code
-2. **Branch** from 
+2. **Branch** from `main`
 3. **Commit** with a conventional message referencing the issue: `fix(#N): description`, `feat(#N): description`
 4. **Open a PR** with `Closes #N` in the body
 5. **Self-review** the diff before requesting review
