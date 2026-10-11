@@ -444,7 +444,7 @@ type searchItem struct {
 
 type searchResponse struct {
 	Items []searchItem `json:"items"`
-	Total int           `json:"total"`
+	Total int          `json:"total"`
 }
 
 // emitSearch prints the search response as a typed table rather than raw JSON.
