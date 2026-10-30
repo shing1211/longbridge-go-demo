@@ -14,7 +14,7 @@ require (
 	github.com/Netflix/go-env v0.0.0-20220526054621-78278af1949d // indirect
 	github.com/golang/protobuf v1.5.2 // indirect
 	github.com/google/go-querystring v1.1.0 // indirect
-	github.com/gorilla/websocket v1.5.0 // indirect
+	github.com/gorilla/websocket v1.5.3 // indirect
 	github.com/jinzhu/copier v0.3.5 // indirect
 	github.com/joho/godotenv v1.4.0 // indirect
 	github.com/longbridge/openapi-protobufs/gen/go v0.7.0 // indirect
